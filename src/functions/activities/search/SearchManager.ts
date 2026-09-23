@@ -23,15 +23,16 @@ export class SearchManager {
         const mobileMissing = quotas.mobile.remaining
         const desktopQuota = this.combineQuotas(quotas.desktop, quotas.edge)
         const desktopMissing = desktopQuota.remaining
+        const runOnZeroPoints = this.bot.config.searchSettings.runOnZeroPoints
 
-        const doMobile = this.bot.config.workers.doMobileSearch && mobileMissing > 0
-        const doDesktop = this.bot.config.workers.doDesktopSearch && desktopMissing > 0
+        const doMobile = this.bot.config.workers.doMobileSearch && (mobileMissing > 0 || runOnZeroPoints)
+        const doDesktop = this.bot.config.workers.doDesktopSearch && (desktopMissing > 0 || runOnZeroPoints)
 
         this.bot.logger.info(
             'main',
             'SEARCH-MANAGER',
-            `Mobile: ${this.describeQuota(this.bot.config.workers.doMobileSearch, quotas.mobile)}` +
-                ` | Desktop: ${this.describeQuota(this.bot.config.workers.doDesktopSearch, desktopQuota)}` +
+            `Mobile: ${this.describeQuota(this.bot.config.workers.doMobileSearch, quotas.mobile, runOnZeroPoints)}` +
+                ` | Desktop: ${this.describeQuota(this.bot.config.workers.doDesktopSearch, desktopQuota, runOnZeroPoints)}` +
                 `${quotas.edge.max > 0 ? ` | Edge: ${quotas.edge.earned}/${quotas.edge.max}` : ''}`
         )
 
@@ -49,8 +50,11 @@ export class SearchManager {
         )
     }
 
-    private describeQuota(enabled: boolean, quota: SearchQuota): string {
+    private describeQuota(enabled: boolean, quota: SearchQuota, runOnZeroPoints: boolean): string {
         if (!enabled) return `skip (disabled, ${quota.earned}/${quota.max})`
+        if (quota.remaining <= 0 && runOnZeroPoints)
+            return `run (runOnZeroPoints, ${quota.max === 0 ? 'quota unavailable' : `${quota.earned}/${quota.max}`})`
+        if (quota.max === 0) return 'skip (quota unavailable, 0/0; enable runOnZeroPoints to search anyway)'
         if (quota.remaining <= 0) return `skip (complete, ${quota.earned}/${quota.max})`
         return `run (${quota.earned}/${quota.max}, missing ${quota.remaining})`
     }

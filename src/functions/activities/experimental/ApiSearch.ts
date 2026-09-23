@@ -6,6 +6,7 @@ import { BingSearchApi } from './BingSearchApi'
 
 const STAGNANT_LIMIT = 10
 const MAX_SEARCHES = 60
+const ZERO_POINT_PROBE_SEARCHES = 3
 const DASHBOARD_REFRESH_EVERY = 5
 
 export class ApiSearch extends BaseActivity {
@@ -25,11 +26,24 @@ export class ApiSearch extends BaseActivity {
                 'SEARCH-BING',
                 `Search points remaining | edge=${missing.edgePoints} | desktop=${missing.desktopPoints} | mobile=${missing.mobilePoints}`
             )
-            if (missing.totalPoints <= 0) {
-                this.bot.logger.info(isMobile, 'SEARCH-BING', 'No search points to earn, skipping')
+            const runOnZeroPoints = this.bot.config.searchSettings.runOnZeroPoints
+            if (missing.totalPoints <= 0 && !runOnZeroPoints) {
+                this.bot.logger.info(
+                    isMobile,
+                    'SEARCH-BING',
+                    'No search points to earn, skipping (runOnZeroPoints is disabled)'
+                )
                 return 0
             }
+            if (missing.totalPoints <= 0) {
+                this.bot.logger.info(
+                    isMobile,
+                    'SEARCH-BING',
+                    `No search points reported; probing up to ${ZERO_POINT_PROBE_SEARCHES} searches because runOnZeroPoints is enabled`
+                )
+            }
             let remainingPoints = missing.totalPoints
+            let probingZeroPoints = runOnZeroPoints && remainingPoints <= 0
 
             const queryQueue = new SearchQueryQueue(this.bot)
             const topicCount = await queryQueue.prepare()
@@ -47,7 +61,7 @@ export class ApiSearch extends BaseActivity {
             let performed = 0
             let lastEarned: number | null = null
 
-            while (performed < MAX_SEARCHES) {
+            while (performed < (probingZeroPoints ? ZERO_POINT_PROBE_SEARCHES : MAX_SEARCHES)) {
                 const query = await queryQueue.next()
                 if (!query) {
                     this.bot.logger.warn(isMobile, 'SEARCH-BING', 'Query queue exhausted, stopping')
@@ -88,6 +102,7 @@ export class ApiSearch extends BaseActivity {
                         const updated = await this.searchProgress.getMissing(isMobile)
                         dashboardProgress = Math.max(0, remainingPoints - updated.totalPoints)
                         remainingPoints = updated.totalPoints
+                        if (remainingPoints > 0) probingZeroPoints = false
                         dashboardChecked = true
                     } catch (error) {
                         this.bot.logger.debug(
@@ -102,7 +117,8 @@ export class ApiSearch extends BaseActivity {
 
                 const searchProgress =
                     dashboardProgress === null ? responseProgress : Math.max(dashboardProgress, responseProgress)
-                const capReached = dashboardChecked ? remainingPoints <= 0 : responseCapReached
+                const capReached =
+                    dashboardChecked && missing.totalPoints > 0 ? remainingPoints <= 0 : responseCapReached
 
                 if (gained > 0) {
                     totalGained += gained
@@ -139,7 +155,7 @@ export class ApiSearch extends BaseActivity {
                     break
                 }
 
-                if (stagnant >= STAGNANT_LIMIT) {
+                if (stagnant >= (probingZeroPoints ? ZERO_POINT_PROBE_SEARCHES : STAGNANT_LIMIT)) {
                     this.bot.logger.warn(
                         isMobile,
                         'SEARCH-BING',

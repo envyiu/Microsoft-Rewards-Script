@@ -469,6 +469,22 @@ export class Login {
             case 'ERROR_ALERT': {
                 const alertEl = page.locator(this.selectors.errorAlert)
                 const errorMsg = await alertEl.innerText().catch(() => 'Unknown Error')
+
+                // Microsoft sometimes answers the KMSI form POST at
+                // /ppsecure/post.srf with an empty alert while the auth cookie
+                // is already valid and the next Rewards navigation succeeds.
+                // Treat that intermediate response as a recoverable redirect,
+                // but keep real, non-empty login errors fatal.
+                if (this.isEmptyLoginPostbackAlert(page, errorMsg)) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'LOGIN',
+                        'Empty Microsoft login postback alert; verifying the Rewards session before failing'
+                    )
+                    await this.recoverFromLoginPostback(page)
+                    return true
+                }
+
                 this.bot.logger.error(this.bot.isMobile, 'LOGIN', `Account error: ${errorMsg}`)
                 throw new Error(`Microsoft login error: ${errorMsg}`)
             }
@@ -864,6 +880,30 @@ export class Login {
                 this.bot.logger.debug(this.bot.isMobile, 'HANDLE-STATE', `Unhandled state: ${state}, continuing`)
                 return true
         }
+    }
+
+    private isEmptyLoginPostbackAlert(page: Page, errorMsg: string): boolean {
+        const url = new URL(page.url())
+        const isPostback =
+            url.hostname.toLowerCase() === 'login.live.com' && /^\/ppsecure\/post\.srf$/i.test(url.pathname)
+        const normalized = errorMsg.trim()
+        return isPostback && (!normalized || /^unknown error$/i.test(normalized))
+    }
+
+    private async recoverFromLoginPostback(page: Page): Promise<void> {
+        await page
+            .goto(URLs.rewards.earn, {
+                waitUntil: 'domcontentloaded',
+                timeout: 15000
+            })
+            .catch(error => {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'LOGIN',
+                    `Rewards navigation after login postback did not finish cleanly: ${error instanceof Error ? error.message : String(error)}`
+                )
+            })
+        await this.bot.utils.wait(1000)
     }
 
     private async finalizeLogin(page: Page, account: Account) {

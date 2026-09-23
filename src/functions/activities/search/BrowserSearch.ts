@@ -14,6 +14,7 @@ const MAX_QUERY_ATTEMPTS = 5
 
 const POINTS_MAX_SEARCHES = 100
 const POINTS_STAGNANT_LIMIT = 10
+const ZERO_POINT_PROBE_SEARCHES = 3
 
 const SEARCH_BOX = '#sb_form_q'
 const RESULT_LINK = '#b_results .b_algo h2'
@@ -39,7 +40,7 @@ export class Search extends BaseActivity {
                 this.bot.logger.warn(
                     isMobile,
                     tracker.context,
-                    `Hit the ${tracker.maxSearches}-search ceiling with points still missing | ${tracker.progress()}`
+                    `Hit the ${tracker.maxSearches}-search ceiling | ${tracker.progress()}`
                 )
             }
 
@@ -241,10 +242,16 @@ export class Search extends BaseActivity {
 
 class PointsTracker implements SearchTracker {
     public readonly context = 'SEARCH-BING'
-    public readonly maxSearches = POINTS_MAX_SEARCHES
-    public readonly stagnantLimit = POINTS_STAGNANT_LIMIT
+    public get maxSearches(): number {
+        return this.probingZeroPoints ? ZERO_POINT_PROBE_SEARCHES : POINTS_MAX_SEARCHES
+    }
+    public get stagnantLimit(): number {
+        return this.probingZeroPoints ? ZERO_POINT_PROBE_SEARCHES : POINTS_STAGNANT_LIMIT
+    }
 
     private missing: MissingSearchPoints = { mobilePoints: 0, desktopPoints: 0, edgePoints: 0, totalPoints: 0 }
+    private probingZeroPoints = false
+    private hasObservedPositiveQuota = false
     private readonly runOnZeroPoints: boolean
     private readonly searchProgress: SearchProgress
 
@@ -258,6 +265,8 @@ class PointsTracker implements SearchTracker {
 
     async prepare(): Promise<boolean> {
         this.missing = await this.searchProgress.getMissing(this.isMobile)
+        this.probingZeroPoints = this.runOnZeroPoints && this.missing.totalPoints <= 0
+        this.hasObservedPositiveQuota = this.missing.totalPoints > 0
         this.bot.logger.info(
             this.isMobile,
             this.context,
@@ -276,7 +285,7 @@ class PointsTracker implements SearchTracker {
             this.bot.logger.info(
                 this.isMobile,
                 this.context,
-                'No search points reported, but runOnZeroPoints is enabled, searching anyway'
+                `No search points reported; probing up to ${ZERO_POINT_PROBE_SEARCHES} searches because runOnZeroPoints is enabled`
             )
         }
         return true
@@ -286,6 +295,10 @@ class PointsTracker implements SearchTracker {
         const updated = await this.searchProgress.getMissing(this.isMobile)
         const gained = Math.max(0, this.missing.totalPoints - updated.totalPoints)
         this.missing = updated
+        if (updated.totalPoints > 0) {
+            this.probingZeroPoints = false
+            this.hasObservedPositiveQuota = true
+        }
 
         if (gained > 0) {
             this.bot.userData.currentPoints = Number(this.bot.userData.currentPoints ?? 0) + gained
@@ -295,7 +308,7 @@ class PointsTracker implements SearchTracker {
     }
 
     done(): boolean {
-        return !this.runOnZeroPoints && this.missing.totalPoints <= 0
+        return this.missing.totalPoints <= 0 && (!this.runOnZeroPoints || this.hasObservedPositiveQuota)
     }
 
     progress(): string {

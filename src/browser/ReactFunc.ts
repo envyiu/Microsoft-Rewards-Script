@@ -64,6 +64,16 @@ export interface AccountState {
     availablePoints: number | null
 }
 
+export interface SearchPointsCounter {
+    max: number
+    progress: number
+}
+
+export interface SearchPointsCounters {
+    pc: SearchPointsCounter | null
+    mobile: SearchPointsCounter | null
+}
+
 export interface PageSnapshot {
     offers: ParsedOffer[]
     reportable: ParsedOffer[]
@@ -127,6 +137,31 @@ export default class ReactFunc {
         const value = Number(matches.at(-1)?.[1])
 
         return Number.isSafeInteger(value) && value >= 0 ? value : null
+    }
+
+    public searchCountersFromEarnPage(html: string): SearchPointsCounters | null {
+        const combined = this.concatFlightChunks(html)
+        const models = this.extractObjects(combined, '"pointsCounters"')
+
+        for (const model of models) {
+            const counters = model.pointsCounters
+            if (!counters || typeof counters !== 'object') continue
+            const values = counters as Record<string, unknown>
+            const pc = this.parseSearchPointsCounter(values.pc)
+            const mobile = this.parseSearchPointsCounter(values.mobile)
+            if (pc || mobile) return { pc, mobile }
+        }
+
+        return null
+    }
+
+    private parseSearchPointsCounter(value: unknown): SearchPointsCounter | null {
+        if (!value || typeof value !== 'object') return null
+        const counter = value as Record<string, unknown>
+        const max = Number(counter.max)
+        const progress = Number(counter.progress)
+        if (!Number.isFinite(max) || max < 0 || !Number.isFinite(progress) || progress < 0) return null
+        return { max, progress }
     }
 
     private concatFlightChunks(html: string | readonly string[]): string {

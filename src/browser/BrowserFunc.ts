@@ -8,7 +8,7 @@ import type { PageSnapshot, ParsedOffer } from './ReactFunc'
 import { loadSession, saveStorageState } from '../util/SessionStore'
 import { isBrowserClosedError } from '../util/Utils'
 
-import type { DashboardData } from './../interface/DashboardData'
+import type { DashboardData, DashboardImpression } from './../interface/DashboardData'
 import type { AppUserData } from '../interface/AppUserData'
 import type { AppEarnablePoints, BrowserEarnablePoints } from '../interface/Points'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
@@ -49,7 +49,10 @@ export default class BrowserFunc {
 
                     await this.applyResponseCookies(URLs.rewards.userInfoApi, response.headers['set-cookie'])
 
-                    if (response.data?.dashboard) return response.data
+                    if (response.data?.dashboard) {
+                        await this.updateSearchCountersFromEarnPage(response.data, cookies, fingerprintHeaders)
+                        return response.data
+                    }
                     throw new Error('Dashboard data missing from API response')
                 } catch (error) {
                     primaryError = error
@@ -101,7 +104,9 @@ export default class BrowserFunc {
                 'GET-DASHBOARD-DATA',
                 `Using partial Bing flyout dashboard | suspectedLimited=${detection.likelyLimited} | botMarkers=${detection.hasBotProfileMarkers} | activitiesCollapsed=${detection.hasCollapsedActivities}`
             )
-            return mapFlyoutToDashboard(response.data)
+            const dashboard = mapFlyoutToDashboard(response.data)
+            await this.updateSearchCountersFromEarnPage(dashboard, cookies, fingerprintHeaders)
+            return dashboard
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,
@@ -109,6 +114,56 @@ export default class BrowserFunc {
                 `Primary dashboard and Bing flyout fallback failed | message=${this.errorMessage(error)}`
             )
             throw error
+        }
+    }
+
+    private async updateSearchCountersFromEarnPage(
+        dashboard: DashboardData,
+        cookies: Cookie[] | undefined,
+        fingerprintHeaders: Record<string, string>
+    ): Promise<void> {
+        try {
+            const response = await this.bot.http.request<string>({
+                url: URLs.rewards.earn,
+                method: 'GET',
+                headers: {
+                    ...fingerprintHeaders,
+                    Accept: 'text/html,application/xhtml+xml',
+                    Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.rewards.earn)),
+                    Referer: URLs.rewards.referer
+                },
+                responseType: 'text',
+                retries: 0
+            })
+
+            await this.applyResponseCookies(URLs.rewards.earn, response.headers['set-cookie'])
+            const search = this.bot.browser.react.searchCountersFromEarnPage(response.data)
+            if (!search) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'GET-DASHBOARD-DATA',
+                    'Rewards earn page has no parseable pointsCounters; search quota remains unavailable'
+                )
+                return
+            }
+
+            const impression = (offerId: string, counter: { max: number; progress: number }): DashboardImpression =>
+                ({ offerId, pointProgress: counter.progress, pointProgressMax: counter.max }) as DashboardImpression
+            const counters = dashboard.dashboard.userStatus.counters
+            counters.pcSearch = search.pc ? [impression('PCSearch', search.pc)] : []
+            counters.mobileSearch = search.mobile ? [impression('MobileSearch', search.mobile)] : []
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'GET-DASHBOARD-DATA',
+                `Search quota from Rewards earn page | desktop=${search.pc ? `${search.pc.progress}/${search.pc.max}` : 'not offered'}` +
+                    ` | mobile=${search.mobile ? `${search.mobile.progress}/${search.mobile.max}` : 'not offered'}`
+            )
+        } catch (error) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'GET-DASHBOARD-DATA',
+                `Could not read search quota from Rewards earn page | message=${this.errorMessage(error)}`
+            )
         }
     }
 

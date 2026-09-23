@@ -39,7 +39,11 @@ class Browser {
         '--disable-dev-shm-usage',
         '--disable-background-networking',
         '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding'
+        '--disable-renderer-backgrounding',
+        // This network resolves login.microsoftonline.com to the same Microsoft
+        // front door as login.windows.net; without it Chromium leaves OAuth
+        // redirects at about:blank while normal HTTPS requests still work.
+        '--host-resolver-rules=MAP login.microsoftonline.com login.windows.net'
     ] as const
 
     constructor(bot: MicrosoftRewardsBot) {
