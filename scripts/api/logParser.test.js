@@ -65,6 +65,20 @@ test('keeps mobile and desktop browser search pools separate in earnable points'
     })
 })
 
+test('tracks smart session budget, performed queries, and refreshed quota', () => {
+    const state = createRunState()
+    apply(state, line('main', 'SMART-SESSION', 'Session start | jobId=job-1 | type=search | platform=mobile | budget=7'), '2026-08-06T09:00:00.000Z')
+    apply(state, line('alpha', 'ACCOUNT-START', 'Starting account: alpha@example.com | geoLocale: US | locale: en-US'), '2026-08-06T09:00:01.000Z')
+    apply(state, line('alpha', 'SMART-SEARCH-END', 'platform=mobile | budget=7 | queries=5 | points=15 | remaining=0 | quotaAvailable=true', 'INFO', 'MOBILE'), '2026-08-06T09:05:00.000Z')
+    apply(state, line('main', 'SMART-SESSION', 'Session end | jobId=job-1 | success=true | durationSeconds=300'), '2026-08-06T09:05:01.000Z')
+    const summary = summarizeRunState(state)
+    assert.equal(summary.smartSession.status, 'complete')
+    assert.deepEqual(summary.accounts[0].smartSearch, {
+        platform: 'mobile', budget: 7, queries: 5, points: 15, remaining: 0,
+        quotaAvailable: true, updatedAt: '2026-08-06T09:05:00.000Z'
+    })
+})
+
 test('attributes per-account summaries by logger user when cluster output is interleaved', () => {
     const state = createRunState()
 

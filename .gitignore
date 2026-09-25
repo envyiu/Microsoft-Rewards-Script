@@ -3,6 +3,7 @@ dist/
 .dev/
 node_modules/
 /config.json
+/config/smart-schedule.json
 /.vscode
 /diagnostics
 note

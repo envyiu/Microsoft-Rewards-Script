@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url'
 import { ProcessManager } from './processManager.js'
 import { buildExcludedAccountsEnv, buildSingleAccountEnv, loadAccounts, mergeAccountStats } from './accounts.js'
 import {
+    accountWriteAvailable,
+    addAccounts,
+    deleteAccount,
+    listManagedAccounts,
+    previewAccounts,
+    updateAccount
+} from './accountStore.js'
+import {
     validateConfig,
     deepMerge,
     readConfig,
@@ -17,6 +25,7 @@ import {
 import { readSchedule, writeSchedule } from './scheduleStore.js'
 import { deleteStoredSessions, listStoredSessions } from './sessionStore.js'
 import { resolveRunCommand } from './runCommand.js'
+import { SmartScheduler } from './smartScheduler.js'
 import {
     log,
     parseArgs,
@@ -114,9 +123,11 @@ const ALLOW_ENV_OVERRIDES = envBool('API_ALLOW_ENV_OVERRIDES', false)
 const REVEAL_ENABLED = envBool('API_ALLOW_CONFIG_REVEAL', false)
 const ALLOW_CONFIG_WRITE = envBool('API_ALLOW_CONFIG_WRITE', false)
 const ALLOW_SCHEDULE_WRITE = envBool('API_ALLOW_SCHEDULE_WRITE', false)
+const ALLOW_ACCOUNT_WRITE = envBool('API_ALLOW_ACCOUNT_WRITE', false)
 
 const RUN_HISTORY = integerSetting('API_RUN_HISTORY', envStr('API_RUN_HISTORY'), 20)
 const DIAG_DIR = envStr('API_DIAGNOSTICS_DIR') ?? path.join(projectRoot, 'diagnostics')
+const SMART_SCHEDULE_FILE = envStr('SMART_SCHEDULE_FILE') ?? path.join(projectRoot, 'config', 'smart-schedule.json')
 
 const { command, args } = resolveRunCommand({ projectRoot })
 
@@ -130,6 +141,22 @@ const pm = new ProcessManager({
     name: pkgName,
     version: pkgVersion
 })
+
+const smartScheduler = new SmartScheduler({
+    projectRoot,
+    command,
+    args,
+    stopTimeoutMs: STOP_TIMEOUT_MS,
+    configFile: SMART_SCHEDULE_FILE,
+    onLog: entry => pm.ingestEntry(entry)
+})
+
+function getStatus() {
+    const status = pm.getStatus()
+    const smart = smartScheduler.get()
+    if (status.state === 'idle' && smart.running.length) status.state = 'running'
+    return { ...status, smart }
+}
 
 const startedAt = Date.now()
 
@@ -271,7 +298,7 @@ function handleEventStream(req, res, url) {
         write(frame)
     }
 
-    sendEvent('hello', pm.getStatus())
+    sendEvent('hello', getStatus())
 
     const lastEventId = Number(req.headers['last-event-id'])
     if (Number.isFinite(lastEventId) && lastEventId > 0) {
@@ -288,9 +315,11 @@ function handleEventStream(req, res, url) {
     }
 
     const onLog = entry => sendEvent('log', entry, entry.id)
-    const onStatus = status => sendEvent('status', status)
+    const onStatus = status => sendEvent('status', { reason: status.reason, ...getStatus() })
+    const onSmart = smart => sendEvent('status', { reason: 'smart-schedule', ...getStatus(), smart })
     pm.on('log', onLog)
     pm.on('status', onStatus)
+    smartScheduler.on('change', onSmart)
 
     const keepAlive = setInterval(() => write(': ping\n\n'), 15000)
     if (typeof keepAlive.unref === 'function') keepAlive.unref()
@@ -299,6 +328,7 @@ function handleEventStream(req, res, url) {
         clearInterval(keepAlive)
         pm.off('log', onLog)
         pm.off('status', onStatus)
+        smartScheduler.off('change', onSmart)
         if (!res.writableEnded) res.end()
     }
     req.on('close', cleanup)
@@ -347,6 +377,10 @@ const requestHandler = async (req, res) => {
                     'GET /errors',
                     'GET /history',
                     'GET /accounts',
+                    'POST /accounts/validate',
+                    'POST /accounts',
+                    'PATCH /accounts/:index',
+                    'DELETE /accounts/:index',
                     'GET /sessions',
                     'GET /diagnostics',
                     'GET /events',
@@ -354,13 +388,16 @@ const requestHandler = async (req, res) => {
                     'GET /config/diff',
                     'POST /config/sync',
                     'GET /schedule',
+                    'GET /smart-schedule',
                     'POST /start',
                     'POST /stop',
                     'POST /restart',
                     'POST /shutdown',
                     'DELETE /sessions/:email',
                     'PUT|PATCH /config',
-                    'PUT|PATCH /schedule'
+                    'PUT|PATCH /schedule',
+                    'PUT /smart-schedule',
+                    'POST /smart-schedule/replan'
                 ]
             })
         }
@@ -371,7 +408,7 @@ const requestHandler = async (req, res) => {
                 ok: true,
                 name: pkgName,
                 version: pkgVersion,
-                state: pm.getStatus().state,
+                state: getStatus().state,
                 uptimeSec: Math.round((Date.now() - startedAt) / 1000),
                 authRequired: Boolean(TOKEN)
             })
@@ -379,7 +416,7 @@ const requestHandler = async (req, res) => {
 
         // status
         if (method === 'GET' && pathname === '/status') {
-            return sendJson(res, 200, pm.getStatus())
+            return sendJson(res, 200, getStatus())
         }
 
         // point read live
@@ -422,7 +459,99 @@ const requestHandler = async (req, res) => {
         // account overview
         if (method === 'GET' && pathname === '/accounts') {
             const accounts = mergeAccountStats(loadAccounts(), pm.getHistory().map(toHistoryRecord))
-            return sendJson(res, 200, { accounts, count: accounts.length })
+            const safeAccounts = listManagedAccounts()
+            const safeByIndex = new Map(safeAccounts.map(account => [account.index, account]))
+            const merged = accounts.map(account => ({ ...account, ...safeByIndex.get(account.index) }))
+            return sendJson(res, 200, {
+                accounts: merged,
+                count: merged.length,
+                writable: ALLOW_ACCOUNT_WRITE && accountWriteAvailable(projectRoot)
+            })
+        }
+
+        if (method === 'POST' && pathname === '/accounts/validate') {
+            const body = await readJsonObject(req)
+            const rawAccounts = Array.isArray(body.accounts) ? body.accounts : [body]
+            try {
+                return sendJson(res, 200, previewAccounts(projectRoot, rawAccounts))
+            } catch (err) {
+                return sendJson(res, err.code === 'DUPLICATE_ACCOUNT' ? 409 : 400, { error: err.message, code: err.code })
+            }
+        }
+
+        if (method === 'POST' && pathname === '/accounts') {
+            if (!ALLOW_ACCOUNT_WRITE) {
+                return sendJson(res, 403, {
+                    error: 'Account writes are disabled. Set API_ALLOW_ACCOUNT_WRITE=true to enable.'
+                })
+            }
+            const body = await readJsonObject(req)
+            const rawAccounts = Array.isArray(body.accounts) ? body.accounts : [body]
+            try {
+                const result = addAccounts(projectRoot, rawAccounts)
+                smartScheduler.enrollAccounts(result.accounts.map(account => account.index))
+                pm.note('info', `Added ${result.count} account configuration(s) via API.`)
+                return sendJson(res, 201, { ...result, writable: true })
+            } catch (err) {
+                const status = ['DUPLICATE_ACCOUNT', 'ACCOUNT_WRITE_UNAVAILABLE', 'ACCOUNT_NOT_FOUND'].includes(err.code) ? 409 : 400
+                return sendJson(res, status, { error: err.message, code: err.code })
+            }
+        }
+
+        const accountMatch = /^\/accounts\/([1-9]\d*)$/.exec(pathname)
+        if (method === 'PATCH' && accountMatch) {
+            if (!ALLOW_ACCOUNT_WRITE) {
+                return sendJson(res, 403, {
+                    error: 'Account writes are disabled. Set API_ALLOW_ACCOUNT_WRITE=true to enable.'
+                })
+            }
+            const body = await readJsonObject(req)
+            try {
+                const result = updateAccount(projectRoot, Number(accountMatch[1]), body)
+                smartScheduler.replan()
+                pm.note('info', `Updated ACCOUNT_${accountMatch[1]} configuration via API.`)
+                return sendJson(res, 200, { ...result, writable: true })
+            } catch (err) {
+                const status = err.code === 'ACCOUNT_NOT_FOUND' ? 404 : err.code === 'ACCOUNT_WRITE_UNAVAILABLE' ? 409 : 400
+                return sendJson(res, status, { error: err.message, code: err.code })
+            }
+        }
+
+        if (method === 'DELETE' && accountMatch) {
+            if (!ALLOW_ACCOUNT_WRITE) {
+                return sendJson(res, 403, {
+                    error: 'Account writes are disabled. Set API_ALLOW_ACCOUNT_WRITE=true to enable.'
+                })
+            }
+            const index = Number(accountMatch[1])
+            const configured = loadAccounts()
+            const target = configured.find(account => account.index === index)
+            if (!target) return sendJson(res, 404, { error: `ACCOUNT_${index} is not configured.`, code: 'ACCOUNT_NOT_FOUND' })
+            if (configured.length <= 1) {
+                return sendJson(res, 409, { error: 'At least one account must remain configured.', code: 'LAST_ACCOUNT' })
+            }
+            const smartRunning = smartScheduler.get().running.some(job => job.accountIndex === index)
+            if (pm.getStatus().state !== 'idle' || smartRunning) {
+                return sendJson(res, 409, { error: 'Stop the active run before deleting this account.', code: 'RUN_ACTIVE' })
+            }
+            try {
+                const result = deleteAccount(projectRoot, index)
+                let sessions = null
+                try {
+                    const loaded = loadConfigSafe(projectRoot)
+                    const sessionPath = typeof loaded?.data?.sessionPath === 'string' ? loaded.data.sessionPath : 'sessions'
+                    sessions = deleteStoredSessions(projectRoot, sessionPath, target.email)
+                } catch (error) {
+                    pm.note('warn', `Deleted ACCOUNT_${index} configuration but could not remove stored sessions.`)
+                    sessions = { error: error instanceof Error ? error.message : String(error) }
+                }
+                smartScheduler.removeAccount(index)
+                pm.note('info', `Deleted ACCOUNT_${index} configuration and stored account sessions.`)
+                return sendJson(res, 200, { ...result, sessions, writable: true })
+            } catch (err) {
+                const status = err.code === 'ACCOUNT_NOT_FOUND' ? 404 : err.code === 'ACCOUNT_WRITE_UNAVAILABLE' ? 409 : 400
+                return sendJson(res, status, { error: err.message, code: err.code })
+            }
         }
 
         // session list
@@ -546,6 +675,44 @@ const requestHandler = async (req, res) => {
             }
         }
 
+        if (method === 'GET' && pathname === '/smart-schedule') {
+            return sendJson(res, 200, { ...smartScheduler.get(), writable: ALLOW_SCHEDULE_WRITE })
+        }
+
+        if (method === 'PUT' && pathname === '/smart-schedule') {
+            if (!ALLOW_SCHEDULE_WRITE) {
+                return sendJson(res, 403, { error: 'Schedule writes are disabled. Set API_ALLOW_SCHEDULE_WRITE=true to enable.' })
+            }
+            const body = await readJsonObject(req)
+            try {
+                if (body.enabled === true && pm.getStatus().state !== 'idle') {
+                    return sendJson(res, 409, { error: 'Stop the active legacy run before enabling Smart Scheduler.', code: 'RUN_ACTIVE' })
+                }
+                const updated = smartScheduler.update(body)
+                if (updated.config.enabled) {
+                    const current = readSchedule(projectRoot)
+                    if (current.enabled) writeSchedule(projectRoot, { enabled: false })
+                }
+                pm.note('info', `Smart schedule ${updated.config.enabled ? 'enabled' : 'disabled'} via API.`)
+                return sendJson(res, 200, { ...updated, writable: true })
+            } catch (err) {
+                return sendJson(res, err.code === 'BAD_REQUEST' ? 400 : 500, { error: err.message, code: err.code })
+            }
+        }
+
+        if (method === 'POST' && pathname === '/smart-schedule/replan') {
+            const body = await readJsonObject(req)
+            try {
+                const accountIndexes = body.accountIndexes == null ? null : body.accountIndexes
+                if (accountIndexes != null && (!Array.isArray(accountIndexes) || accountIndexes.some(v => !Number.isSafeInteger(Number(v)) || Number(v) < 1))) {
+                    return sendJson(res, 400, { error: 'accountIndexes must contain positive integers.', code: 'BAD_REQUEST' })
+                }
+                return sendJson(res, 200, smartScheduler.replan({ accountIndexes }))
+            } catch (err) {
+                return sendJson(res, err.code === 'BAD_REQUEST' ? 400 : 500, { error: err.message, code: err.code })
+            }
+        }
+
         // sched write
         if ((method === 'PUT' || method === 'PATCH') && pathname === '/schedule') {
             if (!ALLOW_SCHEDULE_WRITE) {
@@ -554,6 +721,9 @@ const requestHandler = async (req, res) => {
                 })
             }
             const body = await readJsonBody(req)
+            if (body?.enabled && smartScheduler.get().config.enabled) {
+                return sendJson(res, 409, { error: 'Disable Smart Scheduler before enabling cron.', code: 'SMART_SCHEDULE_ACTIVE' })
+            }
             if (typeof body !== 'object' || body === null || Array.isArray(body)) {
                 return sendJson(res, 400, { error: 'Body must be a JSON object.' })
             }
@@ -578,6 +748,14 @@ const requestHandler = async (req, res) => {
         // start
         if (method === 'POST' && pathname === '/start') {
             const body = await readJsonObject(req)
+            if (smartScheduler.get().config.enabled) {
+                if (body.args != null || body.env != null || body.excludedAccountIndexes != null) {
+                    return sendJson(res, 400, { error: 'Smart mode does not accept args, env, or excludedAccountIndexes.', code: 'BAD_REQUEST' })
+                }
+                const indexes = body.accountIndex == null ? null : [Number(body.accountIndex)]
+                const smart = smartScheduler.trigger(indexes, { force: true })
+                return sendJson(res, 202, { started: true, smart: true, queue: smart.queue, running: smart.running })
+            }
             const overrides = {}
             let selectedAccount = null
             let excludedAccounts = []
@@ -620,6 +798,10 @@ const requestHandler = async (req, res) => {
             const body = await readJsonObject(req)
             const force = readForce(body)
             try {
+                if (smartScheduler.get().running.length) {
+                    void smartScheduler.stop()
+                    if (pm.getStatus().state === 'idle') return sendJson(res, 202, { stopping: true, force, smart: true })
+                }
                 const stopping = pm.stop({ force })
                 stopping.catch(() => {})
                 return sendJson(res, 202, { stopping: true, force })
@@ -632,6 +814,15 @@ const requestHandler = async (req, res) => {
         // restart
         if (method === 'POST' && pathname === '/restart') {
             const body = await readJsonObject(req)
+            if (smartScheduler.get().config.enabled) {
+                if (body.args != null || body.env != null || body.excludedAccountIndexes != null) {
+                    return sendJson(res, 400, { error: 'Smart mode does not accept args, env, or excludedAccountIndexes.', code: 'BAD_REQUEST' })
+                }
+                if (smartScheduler.get().running.length) await smartScheduler.stop()
+                const indexes = body.accountIndex == null ? null : [Number(body.accountIndex)]
+                const smart = smartScheduler.trigger(indexes, { force: true })
+                return sendJson(res, 202, { restarted: true, smart: true, queue: smart.queue, running: smart.running })
+            }
             const overrides = { force: readForce(body) }
             let selectedAccount = null
             let excludedAccounts = []
@@ -820,7 +1011,7 @@ server.listen(PORT, HOST, () => {
     )
     log(
         'INFO',
-        `Runtime state: memory-only | config writes: ${ALLOW_CONFIG_WRITE ? 'on' : 'off'} | schedule writes: ${ALLOW_SCHEDULE_WRITE ? 'on' : 'off'} | session deletion: account-scoped`
+        `Runtime state: memory-only | config writes: ${ALLOW_CONFIG_WRITE ? 'on' : 'off'} | schedule writes: ${ALLOW_SCHEDULE_WRITE ? 'on' : 'off'} | account writes: ${ALLOW_ACCOUNT_WRITE ? 'on' : 'off'} | session deletion: account-scoped`
     )
     if (!TOKEN) {
         const loopback = HOST === '127.0.0.1' || HOST === 'localhost' || HOST === '::1'
@@ -850,6 +1041,10 @@ async function shutdown(signal, { force = false } = {}) {
     log('INFO', `${signal} received - shutting down.`)
     server.close()
     try {
+        if (smartScheduler.get().running.length) {
+            log('INFO', 'Stopping active Smart Scheduler sessions…')
+            await smartScheduler.stop({ resume: false })
+        }
         if (pm.getStatus().state !== 'idle') {
             log('INFO', `Stopping active bot run${force ? ' (force)' : ''}…`)
             await pm.stop({ force })

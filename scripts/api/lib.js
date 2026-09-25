@@ -85,13 +85,21 @@ export function loadEnvFile(projectRoot) {
         const eq = trimmed.indexOf('=')
         if (eq === -1) continue
         const key = trimmed.slice(0, eq).trim()
-        let value = trimmed.slice(eq + 1).trim()
-        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-            value = value.slice(1, -1)
-        }
+        const value = parseEnvValue(trimmed.slice(eq + 1))
         if (process.env[key] === undefined) process.env[key] = value
     }
     return envFile
+}
+
+export function parseEnvValue(raw) {
+    const value = String(raw ?? '').trim()
+    if (value.startsWith('"') && value.endsWith('"')) {
+        try {
+            return JSON.parse(value)
+        } catch {}
+    }
+    if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1)
+    return value
 }
 
 export function loadConfigSafe(projectRoot) {

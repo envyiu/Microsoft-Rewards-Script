@@ -14,6 +14,11 @@ export interface SearchQuotas {
     edge: SearchQuota
 }
 
+export interface SearchQuotaSnapshot {
+    missing: MissingSearchPoints
+    quotaAvailable: boolean
+}
+
 export class SearchProgress {
     constructor(private readonly bot: MicrosoftRewardsBot) {}
 
@@ -23,11 +28,22 @@ export class SearchProgress {
     }
 
     public async getMissing(isMobile: boolean): Promise<MissingSearchPoints> {
-        return this.calculateMissing(await this.getCounters(), isMobile)
+        return (await this.getSnapshot(isMobile)).missing
+    }
+
+    public async getSnapshot(isMobile: boolean): Promise<SearchQuotaSnapshot> {
+        const quotas = this.calculateQuotas(await this.getCounters())
+        return {
+            missing: this.missingFromQuotas(quotas, isMobile),
+            quotaAvailable: isMobile ? quotas.mobile.max > 0 : quotas.desktop.max + quotas.edge.max > 0
+        }
     }
 
     public calculateMissing(counters: Counters, isMobile: boolean): MissingSearchPoints {
-        const quotas = this.calculateQuotas(counters)
+        return this.missingFromQuotas(this.calculateQuotas(counters), isMobile)
+    }
+
+    private missingFromQuotas(quotas: SearchQuotas, isMobile: boolean): MissingSearchPoints {
         const mobilePoints = quotas.mobile.remaining
         const desktopPoints = quotas.desktop.remaining
         const edgePoints = quotas.edge.remaining

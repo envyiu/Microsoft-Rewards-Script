@@ -14,6 +14,7 @@ const BLOCKED_ENV = new Set([
 ])
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 const RESERVED_ENV_KEYS = new Set(['__PROTO__', 'PROTOTYPE', 'CONSTRUCTOR'])
+const INTERNAL_ENV_KEYS = new Set(['MRS_EXECUTION_PLAN'])
 
 export class ProcessManager extends EventEmitter {
     constructor({
@@ -64,7 +65,7 @@ export class ProcessManager extends EventEmitter {
         }
 
         const args = this._resolveArgs(overrides.args)
-        const env = this._resolveEnv(overrides.env)
+        const env = this._resolveEnv(overrides.env, Boolean(overrides.trustedEnv))
 
         this.state = 'starting'
         this.runState = createRunState()
@@ -244,6 +245,15 @@ export class ProcessManager extends EventEmitter {
         this._controllerLog(level, message)
     }
 
+    ingestEntry(entry) {
+        const copy = { ...entry }
+        delete copy.id
+        delete copy.receivedAt
+        this._appendLog(copy)
+        const milestone = applyLogToRunState(this.runState, copy)
+        if (milestone) this._emitStatus(milestone)
+    }
+
     _resolveArgs(argsOverride) {
         if (argsOverride == null) return this.defaultArgs
         if (!Array.isArray(argsOverride) || !argsOverride.every(a => typeof a === 'string')) {
@@ -254,7 +264,7 @@ export class ProcessManager extends EventEmitter {
         return argsOverride
     }
 
-    _resolveEnv(envOverride) {
+    _resolveEnv(envOverride, trusted = false) {
         const env = { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' }
         if (envOverride != null) {
             if (typeof envOverride !== 'object' || Array.isArray(envOverride)) {
@@ -264,6 +274,7 @@ export class ProcessManager extends EventEmitter {
             }
 
             for (const [key, value] of Object.entries(envOverride)) {
+                if (INTERNAL_ENV_KEYS.has(key) && !trusted) continue
                 if (!ENV_KEY_RE.test(key) || RESERVED_ENV_KEYS.has(key.toUpperCase())) {
                     const err = new Error(`Invalid environment variable name: ${JSON.stringify(key)}.`)
                     err.code = 'BAD_REQUEST'

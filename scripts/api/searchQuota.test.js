@@ -7,6 +7,7 @@ const ReactFunc = require('../../dist/browser/ReactFunc.js').default
 const BrowserFunc = require('../../dist/browser/BrowserFunc.js').default
 const { mapFlyoutToDashboard } = require('../../dist/browser/FlyoutDashboard.js')
 const { SearchProgress } = require('../../dist/functions/activities/search/SearchProgress.js')
+const { Search } = require('../../dist/functions/activities/search/BrowserSearch.js')
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} }
 const parser = new ReactFunc({ isMobile: true, logger })
@@ -63,4 +64,70 @@ test('dashboard enrichment and search progress use the real platform-specific qu
     const progress = new SearchProgress({ browser: { func: { getDashboardData: async () => dashboard } } })
     assert.equal((await progress.getMissing(false)).totalPoints, 60)
     assert.equal((await progress.getMissing(true)).totalPoints, 45)
+})
+
+test('search progress distinguishes confirmed zero quota from unavailable counters', async () => {
+    const confirmed = mapFlyoutToDashboard(flyout())
+    confirmed.dashboard.userStatus.counters.pcSearch = [
+        { offerId: 'PCSearch', pointProgress: 90, pointProgressMax: 90 }
+    ]
+    confirmed.dashboard.userStatus.counters.mobileSearch = [
+        { offerId: 'MobileSearch', pointProgress: 60, pointProgressMax: 60 }
+    ]
+    const confirmedProgress = new SearchProgress({
+        browser: { func: { getDashboardData: async () => confirmed } }
+    })
+    assert.deepEqual(await confirmedProgress.getSnapshot(false), {
+        missing: { mobilePoints: 0, desktopPoints: 0, edgePoints: 0, totalPoints: 0 },
+        quotaAvailable: true
+    })
+    assert.deepEqual(await confirmedProgress.getSnapshot(true), {
+        missing: { mobilePoints: 0, desktopPoints: 0, edgePoints: 0, totalPoints: 0 },
+        quotaAvailable: true
+    })
+
+    const unavailable = mapFlyoutToDashboard(flyout())
+    const unavailableProgress = new SearchProgress({
+        browser: { func: { getDashboardData: async () => unavailable } }
+    })
+    assert.equal((await unavailableProgress.getSnapshot(false)).quotaAvailable, false)
+    assert.equal((await unavailableProgress.getSnapshot(true)).quotaAvailable, false)
+})
+
+test('a failed quota refresh does not turn known remaining points into a completed smart search', async () => {
+    const known = mapFlyoutToDashboard(flyout())
+    known.dashboard.userStatus.counters.mobileSearch = [
+        { offerId: 'MobileSearch', pointProgress: 15, pointProgressMax: 60 }
+    ]
+    const unavailable = mapFlyoutToDashboard(flyout())
+    let reads = 0
+    const entries = []
+    const bot = {
+        userData: { currentPoints: 100 },
+        config: { searchSettings: { runOnZeroPoints: true } },
+        logger: {
+            debug() {},
+            warn() {},
+            error() {},
+            info(...args) {
+                entries.push(args)
+            }
+        },
+        browser: {
+            func: {
+                getDashboardData: async () => (++reads === 1 ? known : unavailable)
+            }
+        }
+    }
+    const search = new Search(bot)
+    search.runSearchSession = async (_page, _isMobile, tracker) => {
+        assert.equal(await tracker.prepare(), true)
+        assert.equal(await tracker.measure(), 0)
+        assert.equal(tracker.remaining, 45)
+        assert.equal(tracker.done(), false)
+        return { totalGained: 0, performed: 1, stagnant: 1 }
+    }
+    await search.doSearch({ goto: async () => {} }, true, 5)
+    const smartEnd = entries.find(([, title]) => title === 'SMART-SEARCH-END')
+    assert.match(smartEnd[2], /points=0 \| remaining=45 \| quotaAvailable=true$/)
 })

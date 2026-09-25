@@ -73,7 +73,11 @@ export class SearchManager {
 
         return executionContext.run({ isMobile, account }, async () => {
             try {
-                return await this.bot.activities.doSearch(page, isMobile)
+                const plan = this.bot.executionPlan
+                const budget = plan?.type === 'search' && plan.platform === (isMobile ? 'mobile' : 'desktop')
+                    ? plan.searchBudget
+                    : undefined
+                return await this.bot.activities.doSearch(page, isMobile, budget)
             } catch (error) {
                 this.bot.logger.error(
                     'main',

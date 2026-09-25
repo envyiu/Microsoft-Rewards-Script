@@ -176,16 +176,24 @@ export function loadEnvFile(projectRoot) {
         if (eq === -1) continue
 
         const key = trimmed.slice(0, eq).trim()
-        let value = trimmed.slice(eq + 1).trim()
-
-        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-            value = value.slice(1, -1)
-        }
+        const value = parseEnvValue(trimmed.slice(eq + 1))
 
         if (process.env[key] === undefined) {
             process.env[key] = value
         }
     }
+}
+
+function parseEnvValue(raw) {
+    const value = String(raw ?? '').trim()
+    if (value.startsWith('"') && value.endsWith('"')) {
+        try {
+            const parsed = JSON.parse(value)
+            if (typeof parsed === 'string') return parsed
+        } catch {}
+    }
+    if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1)
+    return value
 }
 
 const deprecationWarned = new Set()

@@ -35,11 +35,11 @@ export default class Activities {
         this.bot = bot
     }
 
-    doSearch = async (page: Page, isMobile: boolean): Promise<number> => {
+    doSearch = async (page: Page, isMobile: boolean, budget?: number): Promise<number> => {
         if (this.bot.config.experimental.apiSearch) {
-            return await new ApiSearch(this.bot).doSearch(isMobile)
+            return await new ApiSearch(this.bot).doSearch(isMobile, budget)
         }
-        return await new BrowserSearch(this.bot).doSearch(page, isMobile)
+        return await new BrowserSearch(this.bot).doSearch(page, isMobile, budget)
     }
 
     doBonusSearches = async (page: Page): Promise<number> => {

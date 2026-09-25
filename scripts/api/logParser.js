@@ -61,6 +61,7 @@ export function createRunState() {
         accounts: {}, // email -> account summary
         errors: [], // recent error/warn messages { ts, level, title, message }
         finished: false,
+        smartSession: null,
         pendingDelay: null // { seconds, nextEmail, sinceTs } while waiting between accounts/workers
     }
 }
@@ -78,6 +79,7 @@ function ensureAccount(state, email) {
             finalPoints: null,
             earnable: null, // { mobile, browser, app }; browser is the desktop search pool
             searchSummary: null, // { mobile, desktop, bonus, total }
+            smartSearch: null,
             streakProtection: null, // { enabled, remainingDays, streakCounter, updatedAt }
             edgeBrowsing: null, // background Edge activity progress and ETA
             durationSeconds: null,
@@ -435,6 +437,41 @@ export function applyLogToRunState(state, entry) {
             }
             break
 
+        case 'SMART-SESSION': {
+            const start = msg.match(/^Session start \| jobId=([^|]+) \| type=(search|workers)(?: \| platform=(mobile|desktop) \| budget=(\d+)| \| workers=([^|]+))?$/)
+            const end = msg.match(/^Session end \| jobId=([^|]+) \| success=(true|false) \| durationSeconds=([\d.]+)$/)
+            if (start) {
+                state.smartSession = {
+                    jobId: start[1].trim(), type: start[2], platform: start[3] || null,
+                    budget: start[4] ? Number(start[4]) : null,
+                    workers: start[5] ? start[5].split(',').filter(Boolean) : [], status: 'running', startedAt: eventTime(entry)
+                }
+                return 'smart-session-start'
+            }
+            if (end) {
+                state.smartSession = { ...(state.smartSession || {}), jobId: end[1].trim(), status: end[2] === 'true' ? 'complete' : 'failed', durationSeconds: Number(end[3]), endedAt: eventTime(entry) }
+                return 'smart-session-end'
+            }
+            break
+        }
+
+        case 'SMART-SEARCH-END': {
+            const fields = Object.fromEntries(msg.split(' | ').map(part => part.split('=')))
+            if (!['mobile', 'desktop'].includes(fields.platform)) break
+            const acc = ensureAccount(state, accountEmailForEntry(state, entry))
+            if (!acc) break
+            acc.smartSearch = {
+                platform: fields.platform,
+                budget: Number(fields.budget),
+                queries: Number(fields.queries),
+                points: Number(fields.points),
+                remaining: Number(fields.remaining),
+                quotaAvailable: fields.quotaAvailable === 'true',
+                updatedAt: eventTime(entry)
+            }
+            return 'smart-search-end'
+        }
+
         case 'REACT-PARSE':
             if ((m = msg.match(RE.streakProtection))) {
                 const acc = ensureAccount(state, m[8])
@@ -520,6 +557,7 @@ export function summarizeRunState(state) {
         collected,
         totals: state.totals,
         finished: state.finished,
+        smartSession: state.smartSession,
         pendingDelay: state.pendingDelay,
         live: {
             currentAccount: state.currentEmail,

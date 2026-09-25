@@ -21,6 +21,8 @@
         "lint:fix": "eslint . --fix",
         "test:log-parser": "node --test scripts/api/logParser.test.js",
         "test:search-quota": "node --test scripts/api/searchQuota.test.js",
+        "test:smart-scheduler": "node --test scripts/api/smartScheduler.test.js",
+        "test:account-store": "node --test scripts/api/accountStore.test.js",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "clear-diagnostics": "rimraf diagnostics",

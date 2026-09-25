@@ -418,6 +418,7 @@ server itself remains dependency-free.
 | `GET`  | `/errors`                       | Recent warning/error logs and per-account failures.               |
 | `GET`  | `/history`                      | Completed runs retained by this API process.                      |
 | `GET`  | `/accounts`                     | Safe summaries of configured accounts and recent run statistics.  |
+| `POST` | `/accounts/validate`            | Validate a redacted account import preview without writing.       |
 | `GET`  | `/sessions`                     | Stored account/platform session metadata without secret contents. |
 | `GET`  | `/diagnostics`                  | List available error-capture directories.                         |
 | `GET`  | `/diagnostics/<capture>/<file>` | Download or view one diagnostic artifact.                         |
@@ -438,6 +439,9 @@ server itself remains dependency-free.
 | `PATCH`  | `/config`          | Deep-merge a partial config after validation.           |
 | `PUT`    | `/schedule`        | Persist and immediately apply supplied schedule fields. |
 | `PATCH`  | `/schedule`        | Persist and immediately apply supplied schedule fields. |
+| `POST`   | `/accounts`         | Add one or more account blocks to `.env` atomically.      |
+| `PATCH`  | `/accounts/:index`  | Update one account block without returning secrets.      |
+| `DELETE` | `/accounts/:index`  | Remove one account block and its stored sessions.        |
 
 ## Reading API state
 
@@ -759,7 +763,8 @@ Response:
         }
     ],
     "latestLogId": 419,
-    "count": 1
+            "count": 1,
+            "writable": false
 }
 ```
 
@@ -970,6 +975,18 @@ Valid account locale values are normalized in this response: language uses canon
 The `runs`, `totalCollected`, `successStreak`, and `last*` fields are calculated
 from this API process's in-memory history and therefore reset after an API
 restart.
+
+### Account writes
+
+Account writes are disabled unless `API_ALLOW_ACCOUNT_WRITE=true`. The dashboard
+uses `POST /accounts/validate` with `{ "accounts": [ ... ] }` before sending the
+same payload to `POST /accounts`. Each object requires `email`; optional fields
+are `password`, `totpSecret`, `recoveryEmail`, `geoLocale`, `langCode`, `proxy`,
+and `saveFingerprint`. The response is always redacted. `PATCH /accounts/:index`
+keeps omitted secret fields, replaces supplied strings, and clears a secret when
+its value is explicitly `null`. `DELETE /accounts/:index` requires an idle bot,
+keeps at least one configured account, removes the account's Smart Scheduler
+profile and deletes its stored mobile/desktop sessions.
 
 ## Session management
 
@@ -1749,6 +1766,62 @@ When writes are disabled, `PUT` and `PATCH` return `403 Forbidden`.
 
 ## Reading and editing the schedule
 
+### Smart Scheduler
+
+Smart mode replaces a single full daily run with small account sessions. Search jobs are platform-specific and carry a
+bounded query budget; non-search sessions carry one or two configured workers. Accounts with the same proxy
+`host:port`, the same `networkGroupOverride`, or no proxy (`DIRECT`) never overlap. Different groups may run in
+parallel up to `maxParallel`.
+
+Smart mode is disabled by default. Its configuration and daily state are atomically persisted in
+`config/smart-schedule.json` (override with `SMART_SCHEDULE_FILE`). Schedule writes use the same
+`API_ALLOW_SCHEDULE_WRITE=true` guard as legacy cron.
+
+- `GET /smart-schedule` returns the redacted configuration, queue, active sessions, per-platform quota/progress and
+  network locks.
+- `PUT /smart-schedule` validates and replaces the Smart Scheduler configuration.
+- `POST /smart-schedule/replan` rebuilds unfinished jobs; optionally pass `{"accountIndexes":[1,2]}`.
+
+Each mobile/desktop platform state includes `quotaKnown`. A successfully parsed counter remains known when its
+remaining value reaches `0`; the platform is then marked complete and no further search job is planned that day. If
+the counter cannot be read, `quotaKnown` is false and `remaining` is `null`; Smart mode permits at most one bounded
+probe for that platform during the day instead of repeatedly treating an unavailable counter as zero.
+
+When Smart mode is enabled, `POST /start` triggers a replan instead of launching a full run. Enabling Smart mode
+disables persisted bot cron, and legacy schedule endpoints reject attempts to re-enable cron until Smart mode is off.
+The dashboard's local scheduler applies the same mutual-exclusion rule.
+
+Example:
+
+```json
+{
+  "enabled": true,
+  "maxParallel": 2,
+  "cooldownMinutes": { "min": 45, "max": 120 },
+  "searchTarget": { "min": 5, "max": 10 },
+  "searchNoise": 3,
+  "searchSafetyCap": 20,
+  "retry": { "maxAttempts": 3, "backoffMinutes": 15 },
+  "sessionTimeoutMinutes": 45,
+  "catchUpThresholdMinutes": 120,
+  "networkGroupOverride": { "2": "office-nat" },
+  "profiles": [
+    {
+      "accountIndex": 1,
+      "timezone": "Asia/Ho_Chi_Minh",
+      "windows": [{ "start": "07:00", "end": "23:00" }],
+      "quietHours": [{ "start": "12:00", "end": "13:00" }],
+      "deadline": "23:00",
+      "allowedWorkers": ["dailySet", "morePromotions", "activateSearchPerk", "claimBonusPoints"]
+    }
+  ]
+}
+```
+
+The runtime execution plan is internal. Client-supplied `MRS_EXECUTION_PLAN` values in `/start` environment overrides
+are ignored, so this interface cannot enable workers outside the validated Smart Scheduler configuration. Worker flags
+that are disabled in the main `config.json` remain disabled.
+
 The schedule endpoints expose the cron schedule used by the Docker-integrated
 API mode. Reading is always available. Writing must be explicitly enabled and
 is intended for the Docker image, where the cron template and `crontab` command
@@ -2015,6 +2088,7 @@ All variables are optional.
 | `API_DIAGNOSTICS_DIR`      | `<repo>/diagnostics`          | Read-only diagnostics directory.                                                            |
 | `API_ALLOW_CONFIG_WRITE`   | `false`                       | Permit `PUT` and `PATCH /config`.                                                           |
 | `API_ALLOW_SCHEDULE_WRITE` | `false`                       | Permit `PUT` and `PATCH /schedule`.                                                         |
+| `API_ALLOW_ACCOUNT_WRITE`  | `false`                       | Permit authenticated account add/edit writes to the local `.env`.                           |
 | `API_ALLOW_ENV_OVERRIDES`  | `false`                       | Permit arbitrary `env` fields in `/start` and `/restart`.                                   |
 | `API_ALLOW_CONFIG_REVEAL`  | `false`                       | Permit authenticated `GET /config?reveal=1`.                                                |
 | `API_VALIDATOR_MODULE`     | auto                          | Path to a compiled module exporting `validateConfig` or `ConfigSchema`.                     |

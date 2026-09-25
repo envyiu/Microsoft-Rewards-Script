@@ -13,26 +13,46 @@ export class ApiSearch extends BaseActivity {
     private readonly searchApi = new BingSearchApi(this.bot)
     private readonly searchProgress = new SearchProgress(this.bot)
 
-    public async doSearch(isMobile: boolean): Promise<number> {
+    public async doSearch(isMobile: boolean, budget?: number): Promise<number> {
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
         let totalGained = 0
 
         this.bot.logger.info(isMobile, 'SEARCH-BING', `Starting Bing searches | currentBalance=${startBalance}`)
 
         try {
-            const missing = await this.searchProgress.getMissing(isMobile)
+            const initialSnapshot = await this.searchProgress.getSnapshot(isMobile)
+            const missing = initialSnapshot.missing
+            let quotaAvailable = initialSnapshot.quotaAvailable
+            const logSmartEnd = (queries: number, remaining: number) => {
+                if (budget == null) return
+                this.bot.logger.info(
+                    isMobile,
+                    'SMART-SEARCH-END',
+                    `platform=${isMobile ? 'mobile' : 'desktop'} | budget=${budget} | queries=${queries} | points=${totalGained} | remaining=${remaining} | quotaAvailable=${quotaAvailable}`
+                )
+            }
             this.bot.logger.info(
                 isMobile,
                 'SEARCH-BING',
                 `Search points remaining | edge=${missing.edgePoints} | desktop=${missing.desktopPoints} | mobile=${missing.mobilePoints}`
             )
             const runOnZeroPoints = this.bot.config.searchSettings.runOnZeroPoints
+            if (missing.totalPoints <= 0 && quotaAvailable && budget != null) {
+                this.bot.logger.info(
+                    isMobile,
+                    'SEARCH-BING',
+                    'Search quota is confirmed complete; skipping smart search session'
+                )
+                logSmartEnd(0, 0)
+                return 0
+            }
             if (missing.totalPoints <= 0 && !runOnZeroPoints) {
                 this.bot.logger.info(
                     isMobile,
                     'SEARCH-BING',
                     'No search points to earn, skipping (runOnZeroPoints is disabled)'
                 )
+                logSmartEnd(0, missing.totalPoints)
                 return 0
             }
             if (missing.totalPoints <= 0) {
@@ -61,7 +81,10 @@ export class ApiSearch extends BaseActivity {
             let performed = 0
             let lastEarned: number | null = null
 
-            while (performed < (probingZeroPoints ? ZERO_POINT_PROBE_SEARCHES : MAX_SEARCHES)) {
+            while (
+                performed <
+                Math.min(probingZeroPoints ? ZERO_POINT_PROBE_SEARCHES : MAX_SEARCHES, budget ?? MAX_SEARCHES)
+            ) {
                 const query = await queryQueue.next()
                 if (!query) {
                     this.bot.logger.warn(isMobile, 'SEARCH-BING', 'Query queue exhausted, stopping')
@@ -99,11 +122,15 @@ export class ApiSearch extends BaseActivity {
 
                 if (shouldRefreshDashboard) {
                     try {
-                        const updated = await this.searchProgress.getMissing(isMobile)
-                        dashboardProgress = Math.max(0, remainingPoints - updated.totalPoints)
-                        remainingPoints = updated.totalPoints
-                        if (remainingPoints > 0) probingZeroPoints = false
-                        dashboardChecked = true
+                        const snapshot = await this.searchProgress.getSnapshot(isMobile)
+                        if (snapshot.quotaAvailable) {
+                            const updated = snapshot.missing
+                            dashboardProgress = Math.max(0, remainingPoints - updated.totalPoints)
+                            remainingPoints = updated.totalPoints
+                            quotaAvailable = true
+                            if (remainingPoints > 0) probingZeroPoints = false
+                            dashboardChecked = true
+                        }
                     } catch (error) {
                         this.bot.logger.debug(
                             isMobile,
@@ -177,6 +204,14 @@ export class ApiSearch extends BaseActivity {
                 'SEARCH-BING',
                 `Completed Bing searches | pointsGained=${totalGained} | currentBalance=${this.bot.userData.currentPoints} | previousBalance=${startBalance} | searches=${performed}`
             )
+            try {
+                const finalSnapshot = await this.searchProgress.getSnapshot(isMobile)
+                if (finalSnapshot.quotaAvailable) {
+                    remainingPoints = finalSnapshot.missing.totalPoints
+                    quotaAvailable = true
+                }
+            } catch {}
+            logSmartEnd(performed, remainingPoints)
             return totalGained
         } catch (error) {
             this.bot.logger.error(

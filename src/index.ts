@@ -31,6 +31,7 @@ import { sendTelegram, flushTelegramQueue } from './logging/Telegram'
 import type { DashboardData } from './interface/DashboardData'
 import type { AppDashboardData } from './interface/AppDashBoardData'
 import type { AppEarnablePoints } from './interface/Points'
+import { loadExecutionPlan, type ExecutionPlan, type SmartWorker } from './interface/ExecutionPlan'
 
 interface ExecutionContext {
     isMobile: boolean
@@ -121,6 +122,7 @@ export class MicrosoftRewardsBot {
     private accounts: Account[]
     private searchManager: SearchManager
     private login = new Login(this)
+    public readonly executionPlan: ExecutionPlan | null
 
     public http!: HttpClient
 
@@ -146,8 +148,42 @@ export class MicrosoftRewardsBot {
             react: new ReactFunc(this)
         }
         this.config = loadConfig()
+        this.executionPlan = loadExecutionPlan()
+        if (this.executionPlan) this.applyExecutionPlan(this.executionPlan)
         this.activeWorkers = this.config.clusters
         this.exitedWorkers = []
+    }
+
+    private applyExecutionPlan(plan: ExecutionPlan): void {
+        const enabled = new Set<SmartWorker>(plan.type === 'workers' ? plan.workers : [])
+        const workers = this.config.workers
+        workers.doDailySet = workers.doDailySet && enabled.has('dailySet')
+        workers.doMorePromotions = workers.doMorePromotions && enabled.has('morePromotions')
+        workers.doClaimBonusPoints = workers.doClaimBonusPoints && enabled.has('claimBonusPoints')
+        workers.doPunchCards = workers.doPunchCards && enabled.has('punchCards')
+        workers.doAppPromotions = workers.doAppPromotions && enabled.has('appPromotions')
+        workers.doDailyCheckIn = workers.doDailyCheckIn && enabled.has('dailyCheckIn')
+        workers.doReadToEarn = workers.doReadToEarn && enabled.has('readToEarn')
+        workers.doActivateSearchPerk = workers.doActivateSearchPerk && enabled.has('activateSearchPerk')
+        workers.doVisualSearch = workers.doVisualSearch && enabled.has('visualSearch')
+        workers.doBonusSearches = workers.doBonusSearches && enabled.has('bonusSearches')
+        workers.doMobileSearch = workers.doMobileSearch && plan.type === 'search' && plan.platform === 'mobile'
+        workers.doDesktopSearch = workers.doDesktopSearch && plan.type === 'search' && plan.platform === 'desktop'
+        this.config.ensureStreakProtection = this.config.ensureStreakProtection && enabled.has('streakProtection')
+        this.config.experimental.edgeBrowsing = false
+        this.config.searchSettings.parallelSearching = false
+        if (plan.type === 'search') this.config.searchSettings.runOnZeroPoints = true
+        this.config.clusters = 1
+    }
+
+    private markCompletedSmartWorkers(appAvailable: boolean): void {
+        const plan = this.executionPlan
+        if (plan?.type !== 'workers') return
+        const appWorkers = new Set<SmartWorker>(['dailyCheckIn', 'appPromotions', 'readToEarn'])
+        for (const worker of plan.workers) {
+            if (appWorkers.has(worker) && !appAvailable) continue
+            this.logger.info('main', 'SMART-WORKER-END', `worker=${worker}`)
+        }
     }
 
     get isMobile(): boolean {
@@ -271,6 +307,17 @@ export class MicrosoftRewardsBot {
             'RUN-START',
             `Starting Microsoft Rewards Script | v${pkg.version} | Accounts: ${totalAccounts} | Clusters: ${this.config.clusters}`
         )
+
+        if (this.executionPlan) {
+            this.logger.info(
+                'main',
+                'SMART-SESSION',
+                `Session start | jobId=${this.executionPlan.jobId} | type=${this.executionPlan.type}` +
+                    (this.executionPlan.type === 'search'
+                        ? ` | platform=${this.executionPlan.platform} | budget=${this.executionPlan.searchBudget}`
+                        : ` | workers=${this.executionPlan.workers.join(',')}`)
+            )
+        }
 
         if (this.config.clusters > 1) {
             if (cluster.isPrimary) {
@@ -515,6 +562,15 @@ export class MicrosoftRewardsBot {
                     success: false,
                     error: error instanceof Error ? error.message : String(error)
                 })
+            }
+
+            if (this.executionPlan) {
+                const outcome = accountStats.at(-1)
+                this.logger.info(
+                    'main',
+                    'SMART-SESSION',
+                    `Session end | jobId=${this.executionPlan.jobId} | success=${outcome?.success === true} | durationSeconds=${outcome?.duration ?? 0}`
+                )
             }
         }
 
@@ -905,6 +961,8 @@ export class MicrosoftRewardsBot {
                 )
 
                 if (this.config.workers.doClaimBonusPoints) await this.activities.doClaimBonusPoints()
+
+                this.markCompletedSmartWorkers(appAvailable)
 
                 if (edgeBrowsingTask) {
                     if (!edgeBrowsingFinished) {

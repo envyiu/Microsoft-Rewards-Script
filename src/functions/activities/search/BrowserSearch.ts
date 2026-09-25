@@ -28,11 +28,11 @@ interface SessionStats {
 export class Search extends BaseActivity {
     private searchCount = 0
 
-    public async doSearch(page: Page, isMobile: boolean): Promise<number> {
+    public async doSearch(page: Page, isMobile: boolean, budget?: number): Promise<number> {
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
         this.bot.logger.info(isMobile, 'SEARCH-BING', `Starting Bing searches | currentBalance=${startBalance}`)
 
-        const tracker = new PointsTracker(this.bot, isMobile)
+        const tracker = new PointsTracker(this.bot, isMobile, budget)
         try {
             const stats = await this.runSearchSession(page, isMobile, tracker)
 
@@ -49,6 +49,13 @@ export class Search extends BaseActivity {
                 tracker.context,
                 `Completed Bing searches | pointsGained=${stats.totalGained} | currentBalance=${this.bot.userData.currentPoints} | previousBalance=${startBalance} | searches=${stats.performed} | ${tracker.progress()}`
             )
+            if (budget != null) {
+                this.bot.logger.info(
+                    isMobile,
+                    'SMART-SEARCH-END',
+                    `platform=${isMobile ? 'mobile' : 'desktop'} | budget=${budget} | queries=${stats.performed} | points=${stats.totalGained} | remaining=${tracker.remaining} | quotaAvailable=${tracker.quotaAvailable}`
+                )
+            }
             return stats.totalGained
         } finally {
             await page.goto(URLs.bing.origin).catch(() => {})
@@ -243,7 +250,8 @@ export class Search extends BaseActivity {
 class PointsTracker implements SearchTracker {
     public readonly context = 'SEARCH-BING'
     public get maxSearches(): number {
-        return this.probingZeroPoints ? ZERO_POINT_PROBE_SEARCHES : POINTS_MAX_SEARCHES
+        const cap = this.probingZeroPoints ? ZERO_POINT_PROBE_SEARCHES : POINTS_MAX_SEARCHES
+        return Math.min(cap, this.budget ?? cap)
     }
     public get stagnantLimit(): number {
         return this.probingZeroPoints ? ZERO_POINT_PROBE_SEARCHES : POINTS_STAGNANT_LIMIT
@@ -254,18 +262,25 @@ class PointsTracker implements SearchTracker {
     private hasObservedPositiveQuota = false
     private readonly runOnZeroPoints: boolean
     private readonly searchProgress: SearchProgress
+    public remaining = 0
+    public quotaAvailable = false
 
     constructor(
         private bot: MicrosoftRewardsBot,
-        private isMobile: boolean
+        private isMobile: boolean,
+        private readonly budget?: number
     ) {
         this.runOnZeroPoints = this.bot.config.searchSettings.runOnZeroPoints ?? false
         this.searchProgress = new SearchProgress(this.bot)
     }
 
     async prepare(): Promise<boolean> {
-        this.missing = await this.searchProgress.getMissing(this.isMobile)
-        this.probingZeroPoints = this.runOnZeroPoints && this.missing.totalPoints <= 0
+        const snapshot = await this.searchProgress.getSnapshot(this.isMobile)
+        this.missing = snapshot.missing
+        this.remaining = this.missing.totalPoints
+        this.quotaAvailable = snapshot.quotaAvailable
+        this.probingZeroPoints =
+            this.runOnZeroPoints && this.missing.totalPoints <= 0 && (!this.quotaAvailable || this.budget == null)
         this.hasObservedPositiveQuota = this.missing.totalPoints > 0
         this.bot.logger.info(
             this.isMobile,
@@ -274,6 +289,14 @@ class PointsTracker implements SearchTracker {
         )
 
         if (this.missing.totalPoints <= 0) {
+            if (this.quotaAvailable && this.budget != null) {
+                this.bot.logger.info(
+                    this.isMobile,
+                    this.context,
+                    'Search quota is confirmed complete; skipping smart search session'
+                )
+                return false
+            }
             if (!this.runOnZeroPoints) {
                 this.bot.logger.info(
                     this.isMobile,
@@ -292,9 +315,13 @@ class PointsTracker implements SearchTracker {
     }
 
     async measure(): Promise<number> {
-        const updated = await this.searchProgress.getMissing(this.isMobile)
+        const snapshot = await this.searchProgress.getSnapshot(this.isMobile)
+        if (!snapshot.quotaAvailable) return 0
+        const updated = snapshot.missing
         const gained = Math.max(0, this.missing.totalPoints - updated.totalPoints)
         this.missing = updated
+        this.remaining = updated.totalPoints
+        this.quotaAvailable ||= snapshot.quotaAvailable
         if (updated.totalPoints > 0) {
             this.probingZeroPoints = false
             this.hasObservedPositiveQuota = true
@@ -308,6 +335,7 @@ class PointsTracker implements SearchTracker {
     }
 
     done(): boolean {
+        if (this.budget != null && this.quotaAvailable && this.missing.totalPoints <= 0) return true
         return this.missing.totalPoints <= 0 && (!this.runOnZeroPoints || this.hasObservedPositiveQuota)
     }
 
