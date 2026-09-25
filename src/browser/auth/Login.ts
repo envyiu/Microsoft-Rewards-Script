@@ -79,6 +79,8 @@ export class Login {
         otpCodeEntry: '[data-testid="codeEntry"]',
         backButton: '#back-button',
         bingProfile: '#id_n',
+        microsoftAccountProfile:
+            '#mectrl_currentAccount_primary, [data-testid="account-card"], [data-testid="user-avatar"]',
         otpInput: 'div[data-testid="codeEntry"]'
     } as const
 
@@ -196,8 +198,31 @@ export class Login {
         }
 
         if (hostname === 'bing.com' || hostname.endsWith('.bing.com') || hostname === 'account.microsoft.com') {
-            this.bot.logger.debug(this.bot.isMobile, 'DETECT-STATE', 'On Bing/rewards/account page, assuming logged in')
-            return 'LOGGED_IN'
+            const [profileVisible, accountProfileVisible, sessionCookies] = await Promise.all([
+                this.checkSelector(page, this.selectors.bingProfile),
+                this.checkSelector(page, this.selectors.microsoftAccountProfile),
+                page
+                    .context()
+                    .cookies()
+                    .then(cookies => cookies.some(cookie => ['MUID', '_U', 'ANON', 'RPSSecAuth'].includes(cookie.name)))
+                    .catch(() => false)
+            ])
+            const rewardsEvidence =
+                hostname === 'rewards.bing.com' &&
+                (await page
+                    .locator('body')
+                    .innerText({ timeout: 1000 })
+                    .then(text => /microsoft rewards|rewards points/i.test(text))
+                    .catch(() => false))
+            if (profileVisible || accountProfileVisible || (sessionCookies && rewardsEvidence)) {
+                this.bot.logger.debug(this.bot.isMobile, 'DETECT-STATE', 'Authenticated session evidence found')
+                return 'LOGGED_IN'
+            }
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'DETECT-STATE',
+                'Microsoft/Bing route found without authenticated session evidence'
+            )
         }
 
         // Page/state selectors are checked together; page-specific routing is resolved below by priority

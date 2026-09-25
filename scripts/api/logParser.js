@@ -81,6 +81,10 @@ function ensureAccount(state, email) {
             searchSummary: null, // { mobile, desktop, bonus, total }
             smartSearch: null,
             streakProtection: null, // { enabled, remainingDays, streakCounter, updatedAt }
+            reliability: {
+                balance: { status: 'unknown', source: null, readAt: null },
+                quota: { status: 'unknown', source: null, readAt: null }
+            },
             edgeBrowsing: null, // background Edge activity progress and ETA
             durationSeconds: null,
             success: null,
@@ -106,8 +110,8 @@ const RE = {
     streakProtection:
         /^Snapshot complete \| offers=(\d+) \| reportable=(\d+) \| streaks=(\d+) \| streakProtectionEnabled=(true|false|null) \| streakProtectionRemainingDays=(\d+|null) \| streakCounter=(\d+|null) \| level=([^|]+) \| account=(\S+@\S+)$/,
     accountEnd:
-        /^Completed account: (\S+) \| pointsGained=(-?\d+) \| previousBalance=(\d+) \| currentBalance=(\d+) \| durationSeconds=([\d.]+)/,
-    runEnd: /^Completed all accounts \| accountsProcessed=(\d+) \| pointsGained=(-?\d+) \| previousBalance=(\d+) \| currentBalance=(\d+) \| runtimeMinutes=([\d.]+)/,
+        /^Completed account: (\S+) \| pointsGained=(-?\d+|unknown) \| previousBalance=(\d+|unknown) \| currentBalance=(\d+|unknown) \| durationSeconds=([\d.]+)/,
+    runEnd: /^Completed all accounts \| accountsProcessed=(\d+) \| pointsGained=(-?\d+|unknown) \| previousBalance=(\d+|unknown) \| currentBalance=(\d+|unknown) \| runtimeMinutes=([\d.]+)/,
     accountError: /^(\S+@\S+): ([\s\S]+)$/,
     flowFailed: /flow failed for (\S+@\S+):/i,
     accountDelay: /^Waiting ([\d.]+) seconds before starting the next account(?: \((\S+@\S+)\))?$/,
@@ -119,6 +123,10 @@ const RE = {
 function numericField(message, name) {
     const match = message.match(new RegExp(`(?:^| \\| )${name}=(-?\\d+(?:\\.\\d+)?)(?= \\| |$)`))
     return match ? Number(match[1]) : null
+}
+
+function knownMetric(value) {
+    return value === 'unknown' ? null : Number(value)
 }
 
 function fractionField(message, name) {
@@ -438,18 +446,30 @@ export function applyLogToRunState(state, entry) {
             break
 
         case 'SMART-SESSION': {
-            const start = msg.match(/^Session start \| jobId=([^|]+) \| type=(search|workers)(?: \| platform=(mobile|desktop) \| budget=(\d+)| \| workers=([^|]+))?$/)
+            const start = msg.match(
+                /^Session start \| jobId=([^|]+) \| type=(search|workers)(?: \| platform=(mobile|desktop) \| budget=(\d+)| \| workers=([^|]+))?$/
+            )
             const end = msg.match(/^Session end \| jobId=([^|]+) \| success=(true|false) \| durationSeconds=([\d.]+)$/)
             if (start) {
                 state.smartSession = {
-                    jobId: start[1].trim(), type: start[2], platform: start[3] || null,
+                    jobId: start[1].trim(),
+                    type: start[2],
+                    platform: start[3] || null,
                     budget: start[4] ? Number(start[4]) : null,
-                    workers: start[5] ? start[5].split(',').filter(Boolean) : [], status: 'running', startedAt: eventTime(entry)
+                    workers: start[5] ? start[5].split(',').filter(Boolean) : [],
+                    status: 'running',
+                    startedAt: eventTime(entry)
                 }
                 return 'smart-session-start'
             }
             if (end) {
-                state.smartSession = { ...(state.smartSession || {}), jobId: end[1].trim(), status: end[2] === 'true' ? 'complete' : 'failed', durationSeconds: Number(end[3]), endedAt: eventTime(entry) }
+                state.smartSession = {
+                    ...(state.smartSession || {}),
+                    jobId: end[1].trim(),
+                    status: end[2] === 'true' ? 'complete' : 'failed',
+                    durationSeconds: Number(end[3]),
+                    endedAt: eventTime(entry)
+                }
                 return 'smart-session-end'
             }
             break
@@ -487,17 +507,45 @@ export function applyLogToRunState(state, entry) {
             }
             break
 
+        case 'REWARDS-STATE': {
+            const fields = Object.fromEntries(msg.split(' | ').map(part => part.split('=')))
+            const acc = ensureAccount(state, accountEmailForEntry(state, entry))
+            if (!acc) break
+            acc.reliability = {
+                balance: {
+                    status: fields.balanceStatus || 'unknown',
+                    source: fields.balanceSource || null,
+                    readAt: fields.readAt || eventTime(entry)
+                },
+                quota: {
+                    status: fields.quotaStatus || 'unknown',
+                    source: fields.quotaStatus === 'fresh' ? 'rewards-rsc' : null,
+                    readAt: fields.readAt || eventTime(entry)
+                }
+            }
+            const balance = Number(fields.balance)
+            if (Number.isFinite(balance) && balance >= 0) {
+                acc.live.balance = balance
+                acc.live.lastUpdateTs = eventTime(entry)
+                state.lastPointUpdateAt = eventTime(entry)
+            }
+            return 'rewards-state'
+        }
+
         case 'ACCOUNT-END':
             if ((m = msg.match(RE.accountEnd))) {
                 const acc = ensureAccount(state, m[1])
                 if (acc) {
-                    acc.collectedPoints = Number(m[2])
-                    acc.initialPoints = Number(m[3])
-                    acc.finalPoints = Number(m[4])
+                    acc.collectedPoints = knownMetric(m[2])
+                    acc.initialPoints = knownMetric(m[3])
+                    acc.finalPoints = knownMetric(m[4])
                     acc.durationSeconds = Number(m[5])
                     acc.success = true
-                    acc.live.gained = Number(m[2])
-                    acc.live.balance = Number(m[4])
+                    if (acc.collectedPoints !== null) acc.live.gained = acc.collectedPoints
+                    if (acc.finalPoints !== null) acc.live.balance = acc.finalPoints
+                    if (acc.finalPoints === null) {
+                        acc.reliability.balance.status = acc.live.balance === null ? 'unknown' : 'stale'
+                    }
                     const at = eventTime(entry)
                     acc.live.lastUpdateTs = at
                     state.lastPointUpdateAt = at
@@ -521,9 +569,9 @@ export function applyLogToRunState(state, entry) {
             if ((m = msg.match(RE.runEnd))) {
                 state.totals = {
                     accountsProcessed: Number(m[1]),
-                    collected: Number(m[2]),
-                    oldTotal: Number(m[3]),
-                    newTotal: Number(m[4]),
+                    collected: knownMetric(m[2]),
+                    oldTotal: knownMetric(m[3]),
+                    newTotal: knownMetric(m[4]),
                     runtimeMinutes: Number(m[5])
                 }
                 state.finished = true
@@ -546,7 +594,7 @@ function accountCollected(a) {
 
 export function summarizeRunState(state) {
     const accounts = state.order.map(email => state.accounts[email])
-    const collected = state.totals?.collected ?? accounts.reduce((sum, a) => sum + accountCollected(a), 0)
+    const collected = state.totals ? state.totals.collected : accounts.reduce((sum, a) => sum + accountCollected(a), 0)
 
     const current = state.currentEmail ? state.accounts[state.currentEmail] : null
     return {

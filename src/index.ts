@@ -45,17 +45,18 @@ interface BrowserSession {
 
 interface AccountStats {
     email: string
-    initialPoints: number
-    finalPoints: number
-    collectedPoints: number
+    initialPoints: number | null
+    finalPoints: number | null
+    collectedPoints: number | null
     duration: number
     success: boolean
     error?: string
 }
 
 interface AccountRunResult {
-    initialPoints: number
-    collectedPoints: number
+    initialPoints: number | null
+    finalPoints: number | null
+    collectedPoints: number | null
     skippedForBotWarning?: boolean
 }
 
@@ -176,12 +177,41 @@ export class MicrosoftRewardsBot {
         this.config.clusters = 1
     }
 
-    private markCompletedSmartWorkers(appAvailable: boolean): void {
+    private markCompletedSmartWorkers(appAvailable: boolean, data: DashboardData): void {
         const plan = this.executionPlan
         if (plan?.type !== 'workers') return
         const appWorkers = new Set<SmartWorker>(['dailyCheckIn', 'appPromotions', 'readToEarn'])
+        const reportActivityWorkers = new Set<SmartWorker>([
+            'dailySet',
+            'morePromotions',
+            'punchCards',
+            'activateSearchPerk',
+            'visualSearch',
+            'streakProtection'
+        ])
         for (const worker of plan.workers) {
             if (appWorkers.has(worker) && !appAvailable) continue
+            if (worker === 'claimBonusPoints' && !this.nextActions.reportClaimAllPoints) {
+                this.logger.warn(
+                    'main',
+                    'SMART-WORKER-PENDING',
+                    'worker=claimBonusPoints | reason=action-id-unavailable'
+                )
+                continue
+            }
+            const today = this.utils.getFormattedDate()
+            const hasDependentOffers =
+                worker === 'dailySet'
+                    ? Boolean(data.dashboard.dailySetPromotions[today]?.length)
+                    : worker === 'morePromotions'
+                      ? Boolean(data.dashboard.morePromotions?.length)
+                      : worker === 'punchCards'
+                        ? Boolean(data.dashboard.punchCards?.length || this.reactSnapshot?.reportable.length)
+                        : true
+            if (reportActivityWorkers.has(worker) && hasDependentOffers && !this.nextActions.reportActivity) {
+                this.logger.warn('main', 'SMART-WORKER-PENDING', `worker=${worker} | reason=action-id-unavailable`)
+                continue
+            }
             this.logger.info('main', 'SMART-WORKER-END', `worker=${worker}`)
         }
     }
@@ -253,7 +283,10 @@ export class MicrosoftRewardsBot {
             refreshSucceeded = true
             return true
         } catch (error) {
-            this.logger.error(
+            const log = reason.startsWith('bootstrap-')
+                ? this.logger.debug.bind(this.logger)
+                : this.logger.error.bind(this.logger)
+            log(
                 this.isMobile,
                 'CONTEXT-REFRESH',
                 `Rewards context refresh failed | reason=${reason} | message=${error instanceof Error ? error.message : String(error)}`
@@ -393,15 +426,15 @@ export class MicrosoftRewardsBot {
             )
 
             if (this.activeWorkers <= 0) {
-                const totalCollectedPoints = allAccountStats.reduce((sum, s) => sum + s.collectedPoints, 0)
-                const totalInitialPoints = allAccountStats.reduce((sum, s) => sum + s.initialPoints, 0)
-                const totalFinalPoints = allAccountStats.reduce((sum, s) => sum + s.finalPoints, 0)
+                const totalCollectedPoints = this.sumKnown(allAccountStats.map(s => s.collectedPoints))
+                const totalInitialPoints = this.sumKnown(allAccountStats.map(s => s.initialPoints))
+                const totalFinalPoints = this.sumKnown(allAccountStats.map(s => s.finalPoints))
                 const totalDurationMinutes = ((Date.now() - runStartTime) / 1000 / 60).toFixed(1)
 
                 this.logger.info(
                     'main',
                     'RUN-END',
-                    `Completed all accounts | accountsProcessed=${allAccountStats.length} | pointsGained=${totalCollectedPoints} | previousBalance=${totalInitialPoints} | currentBalance=${totalFinalPoints} | runtimeMinutes=${totalDurationMinutes}`,
+                    `Completed all accounts | accountsProcessed=${allAccountStats.length} | pointsGained=${this.formatMetric(totalCollectedPoints)} | previousBalance=${this.formatMetric(totalInitialPoints)} | currentBalance=${this.formatMetric(totalFinalPoints)} | runtimeMinutes=${totalDurationMinutes}`,
                     'green'
                 )
 
@@ -497,9 +530,9 @@ export class MicrosoftRewardsBot {
                 const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
 
                 if (result) {
-                    const collectedPoints = result.collectedPoints ?? 0
-                    const accountInitialPoints = result.initialPoints ?? 0
-                    const accountFinalPoints = accountInitialPoints + collectedPoints
+                    const collectedPoints = result.collectedPoints
+                    const accountInitialPoints = result.initialPoints
+                    const accountFinalPoints = result.finalPoints
 
                     if (result.skippedForBotWarning) {
                         accountStats.push({
@@ -530,16 +563,16 @@ export class MicrosoftRewardsBot {
                         this.logger.info(
                             'main',
                             'ACCOUNT-END',
-                            `Completed account: ${accountEmail} | pointsGained=${collectedPoints} | previousBalance=${accountInitialPoints} | currentBalance=${accountFinalPoints} | durationSeconds=${durationSeconds}`,
+                            `Completed account: ${accountEmail} | pointsGained=${this.formatMetric(collectedPoints)} | previousBalance=${this.formatMetric(accountInitialPoints)} | currentBalance=${this.formatMetric(accountFinalPoints)} | durationSeconds=${durationSeconds}`,
                             'green'
                         )
                     }
                 } else {
                     accountStats.push({
                         email: accountEmail,
-                        initialPoints: 0,
-                        finalPoints: 0,
-                        collectedPoints: 0,
+                        initialPoints: null,
+                        finalPoints: null,
+                        collectedPoints: null,
                         duration: parseFloat(durationSeconds),
                         success: false,
                         error: 'Flow failed'
@@ -555,9 +588,9 @@ export class MicrosoftRewardsBot {
 
                 accountStats.push({
                     email: accountEmail,
-                    initialPoints: 0,
-                    finalPoints: 0,
-                    collectedPoints: 0,
+                    initialPoints: null,
+                    finalPoints: null,
+                    collectedPoints: null,
                     duration: parseFloat(durationSeconds),
                     success: false,
                     error: error instanceof Error ? error.message : String(error)
@@ -575,15 +608,15 @@ export class MicrosoftRewardsBot {
         }
 
         if (this.config.clusters <= 1 && cluster.isPrimary) {
-            const totalCollectedPoints = accountStats.reduce((sum, s) => sum + s.collectedPoints, 0)
-            const totalInitialPoints = accountStats.reduce((sum, s) => sum + s.initialPoints, 0)
-            const totalFinalPoints = accountStats.reduce((sum, s) => sum + s.finalPoints, 0)
+            const totalCollectedPoints = this.sumKnown(accountStats.map(s => s.collectedPoints))
+            const totalInitialPoints = this.sumKnown(accountStats.map(s => s.initialPoints))
+            const totalFinalPoints = this.sumKnown(accountStats.map(s => s.finalPoints))
             const totalDurationMinutes = ((Date.now() - runStartTime) / 1000 / 60).toFixed(1)
 
             this.logger.info(
                 'main',
                 'RUN-END',
-                `Completed all accounts | accountsProcessed=${accountStats.length} | pointsGained=${totalCollectedPoints} | previousBalance=${totalInitialPoints} | currentBalance=${totalFinalPoints} | runtimeMinutes=${totalDurationMinutes}`,
+                `Completed all accounts | accountsProcessed=${accountStats.length} | pointsGained=${this.formatMetric(totalCollectedPoints)} | previousBalance=${this.formatMetric(totalInitialPoints)} | currentBalance=${this.formatMetric(totalFinalPoints)} | runtimeMinutes=${totalDurationMinutes}`,
                 'green'
             )
 
@@ -592,6 +625,16 @@ export class MicrosoftRewardsBot {
         }
 
         return accountStats
+    }
+
+    private sumKnown(values: Array<number | null>): number | null {
+        return values.every((value): value is number => value !== null)
+            ? values.reduce((sum, value) => sum + value, 0)
+            : null
+    }
+
+    private formatMetric(value: number | null): string {
+        return value === null ? 'unknown' : String(value)
     }
 
     private async waitBeforeNextAccount(nextEmail?: string): Promise<void> {
@@ -719,7 +762,7 @@ export class MicrosoftRewardsBot {
                     data.dashboard.userWarnings.some(warning => warning?.name === 'Fraud_UserWarning_BotScore_UX')
 
                 if (hasBotScoreWarning) {
-                    const availablePoints = data.dashboard.userStatus.availablePoints ?? 0
+                    const availablePoints = data.dashboard.userStatus.availablePoints
 
                     if (!this.config.contintueOnBotWarning) {
                         this.logger.warn(
@@ -732,6 +775,7 @@ export class MicrosoftRewardsBot {
 
                         return {
                             initialPoints: availablePoints,
+                            finalPoints: availablePoints,
                             collectedPoints: 0,
                             skippedForBotWarning: true
                         }
@@ -785,7 +829,7 @@ export class MicrosoftRewardsBot {
 
                 this.userData.initialPoints = data.dashboard.userStatus.availablePoints
                 this.userData.currentPoints = data.dashboard.userStatus.availablePoints
-                const initialPoints = this.userData.initialPoints ?? 0
+                const initialPoints = this.userData.initialPoints
 
                 const browserEarnable = await this.browser.func.getBrowserEarnablePoints(data)
                 let appEarnable: AppEarnablePoints | null = null
@@ -962,7 +1006,7 @@ export class MicrosoftRewardsBot {
 
                 if (this.config.workers.doClaimBonusPoints) await this.activities.doClaimBonusPoints()
 
-                this.markCompletedSmartWorkers(appAvailable)
+                this.markCompletedSmartWorkers(appAvailable, data)
 
                 if (edgeBrowsingTask) {
                     if (!edgeBrowsingFinished) {
@@ -977,17 +1021,26 @@ export class MicrosoftRewardsBot {
                 }
 
                 const finalPoints = await this.browser.func.getCurrentPoints()
-                const collectedPoints = finalPoints - initialPoints
+                const collectedPoints = finalPoints === null ? null : finalPoints - initialPoints
 
-                this.logger.info(
-                    'main',
-                    'FLOW',
-                    `Points collected | pointsGained=${collectedPoints} | currentBalance=${finalPoints} | account=${accountEmail}`
-                )
+                if (finalPoints === null) {
+                    this.logger.warn(
+                        'main',
+                        'FLOW',
+                        `Points result unavailable | pointsGained=unknown | currentBalance=unknown | account=${accountEmail}`
+                    )
+                } else {
+                    this.logger.info(
+                        'main',
+                        'FLOW',
+                        `Points collected | pointsGained=${collectedPoints} | currentBalance=${finalPoints} | account=${accountEmail}`
+                    )
+                }
 
                 return {
                     initialPoints,
-                    collectedPoints: collectedPoints || 0
+                    finalPoints,
+                    collectedPoints
                 }
             })
         } finally {

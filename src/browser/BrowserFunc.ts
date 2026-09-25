@@ -13,108 +13,121 @@ import type { AppUserData } from '../interface/AppUserData'
 import type { AppEarnablePoints, BrowserEarnablePoints } from '../interface/Points'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
 import { detectFlyoutBotWarning, mapFlyoutToDashboard, type RewardsFlyoutData } from './FlyoutDashboard'
+import {
+    classifyRewardsPage,
+    finiteNonNegative,
+    reliableValue,
+    type ReliableValue,
+    type RewardsPageState
+} from './RewardsState'
 
 export default class BrowserFunc {
     private bot: MicrosoftRewardsBot
 
     private rewardsDeploymentId = ''
 
-    private useFlyoutDashboardFallback = false
+    private bootstrapRecoveryInProgress = false
+    private readonly pointCache = new Map<string, ReliableValue<number>>()
+    public balanceReliability: ReliableValue<number> = reliableValue<number>(null, null, 'unknown')
+    public quotaReliability: ReliableValue<boolean> = reliableValue<boolean>(null, null, 'unknown')
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
     }
 
     async getDashboardData(cookies?: Cookie[]): Promise<DashboardData> {
+        this.quotaReliability = reliableValue<boolean>(null, null, 'unknown')
         const fingerprintHeaders = { ...(this.bot.fingerprint?.headers ?? {}) }
         delete fingerprintHeaders['Cookie']
         delete fingerprintHeaders['cookie']
 
-        if (!this.useFlyoutDashboardFallback) {
-            let primaryError: unknown
+        let lastError: unknown
+        const delays = [0, 1000, 3000]
+        const deadline = Date.now() + 45_000
 
-            for (let attempt = 1; attempt <= 2; attempt++) {
-                try {
-                    const response = await this.bot.http.request<DashboardData>({
-                        url: URLs.rewards.userInfoApi,
-                        method: 'GET',
-                        headers: {
-                            ...fingerprintHeaders,
-                            Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.rewards.userInfoApi)),
-                            Referer: URLs.rewards.referer,
-                            Origin: URLs.rewards.origin
-                        },
-                        retries: 0
-                    })
+        for (let attempt = 0; attempt < delays.length && Date.now() < deadline; attempt++) {
+            if (delays[attempt]) await new Promise(resolve => setTimeout(resolve, delays[attempt]))
+            try {
+                const response = await this.bot.http.request<DashboardData>({
+                    url: URLs.rewards.userInfoApi,
+                    method: 'GET',
+                    headers: {
+                        ...fingerprintHeaders,
+                        Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.rewards.userInfoApi)),
+                        Referer: URLs.rewards.referer,
+                        Origin: URLs.rewards.origin
+                    },
+                    retries: 0
+                })
 
-                    await this.applyResponseCookies(URLs.rewards.userInfoApi, response.headers['set-cookie'])
+                await this.applyResponseCookies(URLs.rewards.userInfoApi, response.headers['set-cookie'])
 
-                    if (response.data?.dashboard) {
-                        await this.updateSearchCountersFromEarnPage(response.data, cookies, fingerprintHeaders)
-                        return response.data
-                    }
-                    throw new Error('Dashboard data missing from API response')
-                } catch (error) {
-                    primaryError = error
-                    if (attempt === 1) {
-                        this.bot.logger.warn(
-                            this.bot.isMobile,
-                            'GET-DASHBOARD-DATA',
-                            `Primary dashboard request failed; retrying once | message=${this.errorMessage(error)}`
-                        )
-                        await new Promise(resolve => setTimeout(resolve, 1000))
-                    }
+                if (this.validDashboard(response.data)) {
+                    await this.updateSearchCountersFromEarnPage(response.data, cookies, fingerprintHeaders)
+                    this.rememberBalance(response.data.dashboard.userStatus.availablePoints, 'rewards-api')
+                    return response.data
                 }
+                throw new Error('Dashboard API response is missing verified Rewards account data')
+            } catch (error) {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'GET-DASHBOARD-DATA',
+                    `Primary dashboard attempt ${attempt + 1}/3 failed | message=${this.errorMessage(error)}`
+                )
             }
 
-            this.useFlyoutDashboardFallback = true
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'GET-DASHBOARD-DATA',
-                `Primary dashboard unavailable after one retry; using Bing flyout fallback | message=${this.errorMessage(primaryError)}`
-            )
+            try {
+                const dashboard = await this.getFlyoutDashboardData(cookies, fingerprintHeaders)
+                this.rememberBalance(dashboard.dashboard.userStatus.availablePoints, 'bing-flyout')
+                return dashboard
+            } catch (error) {
+                lastError = error
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'GET-DASHBOARD-DATA',
+                    `Bing flyout attempt ${attempt + 1}/3 failed | message=${this.errorMessage(error)}`
+                )
+            }
         }
 
-        return await this.getFlyoutDashboardData(cookies, fingerprintHeaders)
+        const cached = this.cachedBalance()
+        this.balanceReliability = cached ?? reliableValue<number>(null, null, 'unknown')
+        this.bot.logger.error(
+            this.bot.isMobile,
+            'GET-DASHBOARD-DATA',
+            `Rewards data unavailable after recovery attempts | message=${this.errorMessage(lastError)}`
+        )
+        throw lastError instanceof Error ? lastError : new Error('Rewards data unavailable')
     }
 
     private async getFlyoutDashboardData(
         cookies: Cookie[] | undefined,
         fingerprintHeaders: Record<string, string>
     ): Promise<DashboardData> {
-        try {
-            const response = await this.bot.http.request<RewardsFlyoutData>({
-                url: URLs.bing.rewardsFlyoutUserInfo,
-                method: 'GET',
-                headers: {
-                    ...fingerprintHeaders,
-                    Accept: 'application/json',
-                    Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.bing.rewardsFlyoutUserInfo)),
-                    Referer: `${URLs.bing.origin}/`,
-                    Origin: URLs.bing.origin
-                },
-                retries: 0
-            })
+        const response = await this.bot.http.request<RewardsFlyoutData>({
+            url: URLs.bing.rewardsFlyoutUserInfo,
+            method: 'GET',
+            headers: {
+                ...fingerprintHeaders,
+                Accept: 'application/json',
+                Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.bing.rewardsFlyoutUserInfo)),
+                Referer: `${URLs.bing.origin}/`,
+                Origin: URLs.bing.origin
+            },
+            retries: 0
+        })
 
-            await this.applyResponseCookies(URLs.bing.rewardsFlyoutUserInfo, response.headers['set-cookie'])
+        await this.applyResponseCookies(URLs.bing.rewardsFlyoutUserInfo, response.headers['set-cookie'])
 
-            const detection = detectFlyoutBotWarning(response.data)
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'GET-DASHBOARD-DATA',
-                `Using partial Bing flyout dashboard | suspectedLimited=${detection.likelyLimited} | botMarkers=${detection.hasBotProfileMarkers} | activitiesCollapsed=${detection.hasCollapsedActivities}`
-            )
-            const dashboard = mapFlyoutToDashboard(response.data)
-            await this.updateSearchCountersFromEarnPage(dashboard, cookies, fingerprintHeaders)
-            return dashboard
-        } catch (error) {
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'GET-DASHBOARD-DATA',
-                `Primary dashboard and Bing flyout fallback failed | message=${this.errorMessage(error)}`
-            )
-            throw error
-        }
+        const detection = detectFlyoutBotWarning(response.data)
+        this.bot.logger.debug(
+            this.bot.isMobile,
+            'GET-DASHBOARD-DATA',
+            `Using partial Bing flyout dashboard | suspectedLimited=${detection.likelyLimited} | botMarkers=${detection.hasBotProfileMarkers} | activitiesCollapsed=${detection.hasCollapsedActivities}`
+        )
+        const dashboard = mapFlyoutToDashboard(response.data)
+        await this.updateSearchCountersFromEarnPage(dashboard, cookies, fingerprintHeaders)
+        return dashboard
     }
 
     private async updateSearchCountersFromEarnPage(
@@ -139,6 +152,7 @@ export default class BrowserFunc {
             await this.applyResponseCookies(URLs.rewards.earn, response.headers['set-cookie'])
             const search = this.bot.browser.react.searchCountersFromEarnPage(response.data)
             if (!search) {
+                this.quotaReliability = reliableValue<boolean>(null, 'rewards-rsc', 'unknown')
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'GET-DASHBOARD-DATA',
@@ -152,6 +166,7 @@ export default class BrowserFunc {
             const counters = dashboard.dashboard.userStatus.counters
             counters.pcSearch = search.pc ? [impression('PCSearch', search.pc)] : []
             counters.mobileSearch = search.mobile ? [impression('MobileSearch', search.mobile)] : []
+            this.quotaReliability = reliableValue(true, 'rewards-rsc', 'fresh')
             this.bot.logger.info(
                 this.bot.isMobile,
                 'GET-DASHBOARD-DATA',
@@ -159,6 +174,7 @@ export default class BrowserFunc {
                     ` | mobile=${search.mobile ? `${search.mobile.progress}/${search.mobile.max}` : 'not offered'}`
             )
         } catch (error) {
+            this.quotaReliability = reliableValue<boolean>(null, 'rewards-rsc', 'unknown')
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'GET-DASHBOARD-DATA',
@@ -310,108 +326,214 @@ export default class BrowserFunc {
         }
     }
 
-    async getCurrentPoints(): Promise<number> {
+    async getCurrentPoints(): Promise<number | null> {
         try {
             const data = await this.getDashboardData()
-
-            return data.dashboard.userStatus.availablePoints
+            const points = finiteNonNegative(data.dashboard.userStatus.availablePoints)
+            if (points !== null) return points
         } catch (error) {
-            this.bot.logger.error(
+            this.bot.logger.debug(
                 this.bot.isMobile,
                 'GET-CURRENT-POINTS',
-                `An error occurred: ${error instanceof Error ? error.message : String(error)}`
+                `Dashboard sources unavailable | message=${error instanceof Error ? error.message : String(error)}`
             )
-            throw error
         }
+
+        const payloadPoints = finiteNonNegative(this.bot.reactSnapshot?.account.availablePoints)
+        if (payloadPoints !== null) {
+            this.rememberBalance(payloadPoints, 'rewards-rsc')
+            return payloadPoints
+        }
+
+        const page = this.getActivePage()
+        if (page) {
+            const selectors = [
+                '[data-testid="available-points"]',
+                '[aria-label*="Available points"]',
+                '[aria-label*="Rewards points"]'
+            ]
+            for (const selector of selectors) {
+                const text = await page
+                    .locator(selector)
+                    .first()
+                    .textContent({ timeout: 750 })
+                    .catch(() => null)
+                const normalized = text?.replace(/[^\d]/g, '') ?? ''
+                const points = normalized ? Number(normalized) : Number.NaN
+                if (Number.isFinite(points) && points >= 0) {
+                    this.rememberBalance(points, 'rewards-dom')
+                    return points
+                }
+            }
+        }
+
+        const cached = this.cachedBalance()
+        this.balanceReliability = cached ?? reliableValue<number>(null, null, 'unknown')
+        this.bot.logger.warn(
+            this.bot.isMobile,
+            'GET-CURRENT-POINTS',
+            cached
+                ? 'Current balance unavailable; retaining previous balance as stale display data'
+                : 'Current balance unavailable'
+        )
+        return null
+    }
+
+    private validDashboard(data: DashboardData | null | undefined): data is DashboardData {
+        if (!data?.dashboard?.userStatus || !data.dashboard.userProfile) return false
+        return Boolean(
+            data.dashboard.userStatus.isRewardsUser !== false &&
+            finiteNonNegative(data.dashboard.userStatus.availablePoints) !== null
+        )
+    }
+
+    private pointCacheKey(): string | null {
+        const email = this.bot.currentAccountEmail?.trim().toLowerCase()
+        if (!email) return null
+        const platform = this.bot.isMobile ? 'mobile' : 'desktop'
+        return `${email}|${platform}|${new Date().toISOString().slice(0, 10)}`
+    }
+
+    private rememberBalance(value: unknown, source: string): void {
+        const points = finiteNonNegative(value)
+        if (points === null) return
+        const result = reliableValue(points, source, 'fresh')
+        this.balanceReliability = result
+        const key = this.pointCacheKey()
+        if (key) this.pointCache.set(key, result)
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'REWARDS-STATE',
+            `balance=${points} | balanceStatus=fresh | balanceSource=${source} | quotaStatus=${this.quotaReliability.freshness} | readAt=${result.readAt} | account=${this.bot.currentAccountEmail ?? 'unknown'}`
+        )
+    }
+
+    private cachedBalance(): ReliableValue<number> | null {
+        const key = this.pointCacheKey()
+        const cached = key ? this.pointCache.get(key) : undefined
+        return cached ? { ...cached, freshness: 'stale' } : null
     }
 
     async bootstrap(page: Page): Promise<void> {
-        try {
-            // /earn is the offers page
-            await page.goto(URLs.rewards.earn, { waitUntil: 'domcontentloaded' })
+        const deadline = Date.now() + 45_000
+        const delays = [0, 1000, 3000]
+        let lastState: RewardsPageState = 'loading'
+        let lastError: unknown
 
-            // first-time welcome modal blocks the dashboard from rendering
-            await this.dismissRewardsWelcomeDialog(page)
+        for (let attempt = 0; attempt < delays.length && Date.now() < deadline; attempt++) {
+            if (delays[attempt]) await new Promise(resolve => setTimeout(resolve, delays[attempt]))
+            try {
+                const navigationTimeout = Math.max(250, Math.min(15_000, deadline - Date.now()))
+                if (attempt === 0)
+                    await page.goto(URLs.rewards.earn, { waitUntil: 'domcontentloaded', timeout: navigationTimeout })
+                else
+                    await page
+                        .reload({ waitUntil: 'domcontentloaded', timeout: navigationTimeout })
+                        .catch(() => undefined)
+                await this.dismissRewardsWelcomeDialog(page, deadline)
 
-            const earnDom = await page.content()
-            const earnRaw = await this.fetchBootstrapHtml(page, URLs.rewards.earn, '/earn')
-
-            this.rewardsDeploymentId = this.bot.browser.react.buildId(earnRaw || earnDom) ?? ''
-
-            this.bot.nextRouterStateTree = this.bot.browser.react.routerStateTree('earn')
-
-            // pull /dashboard HTML to capture chunks that /earn doesn't show
-            const dashboardHtml = await this.fetchBootstrapHtml(page, URLs.rewards.dashboard, '/dashboard')
-
-            const sources = [earnRaw, earnDom, dashboardHtml].filter(Boolean)
-            const snapshot = this.bot.browser.react.snapshotPage(sources)
-            this.bot.reactSnapshot = snapshot
-            if (this.bot.isMobile) this.bot.reactSnapshots.mobile = snapshot
-            else this.bot.reactSnapshots.desktop = snapshot
-
-            // discovered from chunks referenced by either page
-            this.bot.nextActions = await this.resolveActionIds(page, sources)
-
-            const dashboardRendered = /<section\b[^>]*\bid=["']dailyset["']/i.test(sources.join('\n'))
-            if (!dashboardRendered) {
-                throw new Error(
-                    'Rewards dashboard did not render (no section#dailyset) - likely a login/redirect issue, aborting'
+                const earnDom = await page.content()
+                const earnRaw = await this.fetchBootstrapHtml(page, URLs.rewards.earn, '/earn', deadline)
+                const dashboardHtml = await this.fetchBootstrapHtml(
+                    page,
+                    URLs.rewards.dashboard,
+                    '/dashboard',
+                    deadline
                 )
+                const sources = [earnRaw, earnDom, dashboardHtml].filter(Boolean)
+                const combined = sources.join('\n')
+                const snapshot = this.bot.browser.react.snapshotPage(sources)
+                const actions = await this.resolveActionIds(page, sources, deadline)
+
+                lastState = classifyRewardsPage({
+                    url: page.url(),
+                    html: combined,
+                    snapshot,
+                    actionCount: Object.keys(actions).length,
+                    rewardsAccountConfirmed: /["']isRewardsUser["']\s*:\s*true/i.test(combined)
+                })
+
+                if (lastState === 'rewards-ready' || lastState === 'rewards-partial') {
+                    this.rewardsDeploymentId = this.bot.browser.react.buildId(earnRaw || earnDom) ?? ''
+                    this.bot.nextRouterStateTree = this.bot.browser.react.routerStateTree('earn')
+                    this.bot.reactSnapshot = snapshot
+                    if (this.bot.isMobile) this.bot.reactSnapshots.mobile = snapshot
+                    else this.bot.reactSnapshots.desktop = snapshot
+                    this.bot.nextActions = actions
+
+                    if (!snapshot.offers.length) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'BOOTSTRAP',
+                            'Rewards account confirmed with no offers; offer-dependent tasks will be skipped'
+                        )
+                    }
+                    if (!Object.keys(actions).length) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'BOOTSTRAP',
+                            'Rewards data is partial; server-action-dependent tasks will be deferred'
+                        )
+                    }
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'BOOTSTRAP',
+                        `Context ready | state=${lastState} | actions=${Object.keys(actions).length} | reportable=${snapshot.reportable.length} | available=${snapshot.account.availablePoints}`
+                    )
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'BUILD',
+                        `Rewards build | id=${this.rewardsDeploymentId || 'unknown'}`,
+                        'cyan'
+                    )
+                    return
+                }
+            } catch (error) {
+                lastError = error
             }
 
-            if (!this.bot.reactSnapshot.offers.length) {
-                this.bot.logger.warn(
-                    this.bot.isMobile,
-                    'BOOTSTRAP',
-                    'No offers parsed - page may not have rendered the RSC payload (check login/redirect)'
-                )
-            }
-
-            if (!Object.keys(this.bot.nextActions).length) {
-                this.bot.logger.warn(
-                    this.bot.isMobile,
-                    'BOOTSTRAP',
-                    'No action ids discovered - server-action calls will fail (bundle may have stripped names)'
-                )
-            }
-
-            this.bot.logger.info(
+            this.bot.logger.debug(
                 this.bot.isMobile,
                 'BOOTSTRAP',
-                `Context ready | actions=${Object.keys(this.bot.nextActions).length} | reportable=${this.bot.reactSnapshot.reportable.length} | available=${this.bot.reactSnapshot.account.availablePoints}`
+                `Context attempt ${attempt + 1}/3 incomplete | state=${lastState} | error=${lastError ? this.errorMessage(lastError) : 'none'}`
             )
-
-            this.bot.logger.info(
-                this.bot.isMobile,
-                'BUILD',
-                `Rewards build | id=${this.rewardsDeploymentId || 'unknown'}`,
-                'cyan'
-            )
-        } catch (error) {
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'BOOTSTRAP',
-                `Failed acquiring context | error=${error instanceof Error ? error.message : String(error)}`
-            )
-            throw error
         }
+
+        if (!this.bootstrapRecoveryInProgress) {
+            this.bootstrapRecoveryInProgress = true
+            try {
+                if (await this.bot.refreshCurrentRewardsContext(`bootstrap-${lastState}`)) return
+            } finally {
+                this.bootstrapRecoveryInProgress = false
+            }
+        }
+
+        const message = `Rewards context unavailable after recovery | state=${lastState} | error=${lastError ? this.errorMessage(lastError) : 'none'}`
+        this.bot.logger.error(this.bot.isMobile, 'BOOTSTRAP', message)
+        throw new Error(message)
     }
 
     /**
      * Dismisses the first-time welcome modal on /earn, which otherwise
      * prevents section#dailyset from rendering.
      */
-    private async dismissRewardsWelcomeDialog(page: Page): Promise<void> {
+    private async dismissRewardsWelcomeDialog(page: Page, deadline = Date.now() + 10_000): Promise<void> {
         try {
             const welcomeButton = await page
-                .waitForSelector('section[role="dialog"] button[slot="close"]', { timeout: 5000 })
+                .waitForSelector('section[role="dialog"] button[slot="close"]', {
+                    timeout: Math.max(250, Math.min(5000, deadline - Date.now()))
+                })
                 .catch(() => null)
             if (!welcomeButton) return
 
-            await welcomeButton.click({ timeout: 5000 })
+            await welcomeButton.click({ timeout: Math.max(250, Math.min(5000, deadline - Date.now())) })
             this.bot.logger.info(this.bot.isMobile, 'BOOTSTRAP', 'Dismissed welcome dialog')
 
-            await page.waitForSelector('section#dailyset', { timeout: 15000 }).catch(() => undefined)
+            await page
+                .waitForLoadState('domcontentloaded', {
+                    timeout: Math.max(250, Math.min(5000, deadline - Date.now()))
+                })
+                .catch(() => undefined)
         } catch (error) {
             this.bot.logger.warn(
                 this.bot.isMobile,
@@ -421,9 +543,14 @@ export default class BrowserFunc {
         }
     }
 
-    private async fetchBootstrapHtml(page: Page, url: string, route: string): Promise<string> {
+    private async fetchBootstrapHtml(
+        page: Page,
+        url: string,
+        route: string,
+        deadline = Date.now() + 20_000
+    ): Promise<string> {
         try {
-            const res = await page.request.get(url, { timeout: 20000 })
+            const res = await page.request.get(url, { timeout: Math.max(250, Math.min(20_000, deadline - Date.now())) })
             if (res.ok()) return await res.text()
 
             this.bot.logger.warn(
@@ -442,7 +569,11 @@ export default class BrowserFunc {
         return ''
     }
 
-    private async resolveActionIds(page: Page, htmls: string[]): Promise<Record<string, string>> {
+    private async resolveActionIds(
+        page: Page,
+        htmls: string[],
+        deadline = Date.now() + 20_000
+    ): Promise<Record<string, string>> {
         const result: Record<string, string> = {}
 
         try {
@@ -464,7 +595,7 @@ export default class BrowserFunc {
             }
 
             this.bot.logger.debug(this.bot.isMobile, 'BOOTSTRAP', `Fetching ${initialChunks.size} initial JS chunks`)
-            const jsByPath = await this.fetchJsChunks(page, [...initialChunks])
+            const jsByPath = await this.fetchJsChunks(page, [...initialChunks], deadline)
 
             const dynamicPaths = new Set<string>()
             for (const js of jsByPath.values()) {
@@ -479,7 +610,7 @@ export default class BrowserFunc {
                     'BOOTSTRAP',
                     `Fetching ${dynamicPaths.size} dynamic chunks discovered via webpack manifest`
                 )
-                const moreJs = await this.fetchJsChunks(page, [...dynamicPaths])
+                const moreJs = await this.fetchJsChunks(page, [...dynamicPaths], deadline)
                 for (const [path, js] of moreJs) jsByPath.set(path, js)
             }
 
@@ -526,13 +657,15 @@ export default class BrowserFunc {
         return result
     }
 
-    private async fetchJsChunks(page: Page, paths: string[]): Promise<Map<string, string>> {
+    private async fetchJsChunks(page: Page, paths: string[], deadline: number): Promise<Map<string, string>> {
         const result = new Map<string, string>()
 
         await Promise.all(
             paths.map(async path => {
                 try {
-                    const res = await page.request.get(URLs.rewards.path(path))
+                    const res = await page.request.get(URLs.rewards.path(path), {
+                        timeout: Math.max(250, Math.min(10_000, deadline - Date.now()))
+                    })
                     if (res.ok()) {
                         result.set(path, await res.text())
                     }

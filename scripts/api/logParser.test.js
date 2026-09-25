@@ -67,16 +67,89 @@ test('keeps mobile and desktop browser search pools separate in earnable points'
 
 test('tracks smart session budget, performed queries, and refreshed quota', () => {
     const state = createRunState()
-    apply(state, line('main', 'SMART-SESSION', 'Session start | jobId=job-1 | type=search | platform=mobile | budget=7'), '2026-08-06T09:00:00.000Z')
-    apply(state, line('alpha', 'ACCOUNT-START', 'Starting account: alpha@example.com | geoLocale: US | locale: en-US'), '2026-08-06T09:00:01.000Z')
-    apply(state, line('alpha', 'SMART-SEARCH-END', 'platform=mobile | budget=7 | queries=5 | points=15 | remaining=0 | quotaAvailable=true', 'INFO', 'MOBILE'), '2026-08-06T09:05:00.000Z')
-    apply(state, line('main', 'SMART-SESSION', 'Session end | jobId=job-1 | success=true | durationSeconds=300'), '2026-08-06T09:05:01.000Z')
+    apply(
+        state,
+        line('main', 'SMART-SESSION', 'Session start | jobId=job-1 | type=search | platform=mobile | budget=7'),
+        '2026-08-06T09:00:00.000Z'
+    )
+    apply(
+        state,
+        line('alpha', 'ACCOUNT-START', 'Starting account: alpha@example.com | geoLocale: US | locale: en-US'),
+        '2026-08-06T09:00:01.000Z'
+    )
+    apply(
+        state,
+        line(
+            'alpha',
+            'SMART-SEARCH-END',
+            'platform=mobile | budget=7 | queries=5 | points=15 | remaining=0 | quotaAvailable=true',
+            'INFO',
+            'MOBILE'
+        ),
+        '2026-08-06T09:05:00.000Z'
+    )
+    apply(
+        state,
+        line('main', 'SMART-SESSION', 'Session end | jobId=job-1 | success=true | durationSeconds=300'),
+        '2026-08-06T09:05:01.000Z'
+    )
     const summary = summarizeRunState(state)
     assert.equal(summary.smartSession.status, 'complete')
     assert.deepEqual(summary.accounts[0].smartSearch, {
-        platform: 'mobile', budget: 7, queries: 5, points: 15, remaining: 0,
-        quotaAvailable: true, updatedAt: '2026-08-06T09:05:00.000Z'
+        platform: 'mobile',
+        budget: 7,
+        queries: 5,
+        points: 15,
+        remaining: 0,
+        quotaAvailable: true,
+        updatedAt: '2026-08-06T09:05:00.000Z'
     })
+})
+
+test('preserves unknown final balances and exposes Rewards data reliability', () => {
+    const state = createRunState()
+    apply(
+        state,
+        line('alpha', 'ACCOUNT-START', 'Starting account: alpha@example.com | geoLocale: US | locale: en-US'),
+        '2026-08-06T09:00:00.000Z'
+    )
+    apply(
+        state,
+        line(
+            'alpha',
+            'REWARDS-STATE',
+            'balance=0 | balanceStatus=fresh | balanceSource=rewards-api | quotaStatus=unknown | readAt=2026-08-06T09:00:01.000Z | account=alpha@example.com',
+            'INFO',
+            'MOBILE'
+        ),
+        '2026-08-06T09:00:01.000Z'
+    )
+    apply(
+        state,
+        line(
+            'main',
+            'ACCOUNT-END',
+            'Completed account: alpha@example.com | pointsGained=unknown | previousBalance=0 | currentBalance=unknown | durationSeconds=20'
+        ),
+        '2026-08-06T09:00:20.000Z'
+    )
+    apply(
+        state,
+        line(
+            'main',
+            'RUN-END',
+            'Completed all accounts | accountsProcessed=1 | pointsGained=unknown | previousBalance=0 | currentBalance=unknown | runtimeMinutes=0.3'
+        ),
+        '2026-08-06T09:00:21.000Z'
+    )
+
+    const account = state.accounts['alpha@example.com']
+    assert.equal(account.initialPoints, 0)
+    assert.equal(account.finalPoints, null)
+    assert.equal(account.collectedPoints, null)
+    assert.equal(account.reliability.balance.status, 'stale')
+    assert.equal(account.reliability.quota.status, 'unknown')
+    assert.equal(summarizeRunState(state).collected, null)
 })
 
 test('attributes per-account summaries by logger user when cluster output is interleaved', () => {

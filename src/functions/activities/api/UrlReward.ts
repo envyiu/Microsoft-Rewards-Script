@@ -90,6 +90,14 @@ export class UrlReward extends BaseActivity {
             }
 
             const newBalance = availablePoints ?? (await this.bot.browser.func.getCurrentPoints())
+            if (newBalance === null) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'URL-REWARD',
+                    `UrlReward acknowledged but final balance is unknown | offerId=${offerId} | status=${status}`
+                )
+                return
+            }
             const gainedPoints = newBalance - oldBalance
 
             this.bot.logger.debug(

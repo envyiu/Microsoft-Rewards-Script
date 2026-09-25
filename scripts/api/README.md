@@ -439,9 +439,9 @@ server itself remains dependency-free.
 | `PATCH`  | `/config`          | Deep-merge a partial config after validation.           |
 | `PUT`    | `/schedule`        | Persist and immediately apply supplied schedule fields. |
 | `PATCH`  | `/schedule`        | Persist and immediately apply supplied schedule fields. |
-| `POST`   | `/accounts`         | Add one or more account blocks to `.env` atomically.      |
-| `PATCH`  | `/accounts/:index`  | Update one account block without returning secrets.      |
-| `DELETE` | `/accounts/:index`  | Remove one account block and its stored sessions.        |
+| `POST`   | `/accounts`        | Add one or more account blocks to `.env` atomically.    |
+| `PATCH`  | `/accounts/:index` | Update one account block without returning secrets.     |
+| `DELETE` | `/accounts/:index` | Remove one account block and its stored sessions.       |
 
 ## Reading API state
 
@@ -647,6 +647,10 @@ console.log(data)
     "startedAt": "2026-07-14T09:30:00.000Z",
     "currentAccount": "user@example.com",
     "balance": 12480,
+    "reliability": {
+        "balance": { "status": "fresh", "source": "rewards-api", "readAt": "2026-07-14T09:31:04.000Z" },
+        "quota": { "status": "fresh", "source": "rewards-rsc", "readAt": "2026-07-14T09:31:04.000Z" }
+    },
     "collected": 155,
     "updatedAt": "7/14/2026, 11:31:04 AM",
     "finished": false,
@@ -658,6 +662,10 @@ console.log(data)
             "email": "user@example.com",
             "collected": 155,
             "balance": 12480,
+            "reliability": {
+                "balance": { "status": "fresh", "source": "rewards-api", "readAt": "2026-07-14T09:31:04.000Z" },
+                "quota": { "status": "fresh", "source": "rewards-rsc", "readAt": "2026-07-14T09:31:04.000Z" }
+            },
             "initialPoints": 12325,
             "bySource": { "search": 150, "checkIn": 5 },
             "earnable": { "mobile": 60, "browser": 90, "app": 30 },
@@ -763,8 +771,8 @@ Response:
         }
     ],
     "latestLogId": 419,
-            "count": 1,
-            "writable": false
+    "count": 1,
+    "writable": false
 }
 ```
 
@@ -1784,8 +1792,9 @@ Smart mode is disabled by default. Its configuration and daily state are atomica
 
 Each mobile/desktop platform state includes `quotaKnown`. A successfully parsed counter remains known when its
 remaining value reaches `0`; the platform is then marked complete and no further search job is planned that day. If
-the counter cannot be read, `quotaKnown` is false and `remaining` is `null`; Smart mode permits at most one bounded
-probe for that platform during the day instead of repeatedly treating an unavailable counter as zero.
+the counter cannot be read, `quotaKnown` is false and `remaining` is `null`; Smart mode keeps the platform pending,
+retries it with the configured backoff, and stops after `retry.maxAttempts` instead of treating unavailable data as
+zero or complete.
 
 When Smart mode is enabled, `POST /start` triggers a replan instead of launching a full run. Enabling Smart mode
 disables persisted bot cron, and legacy schedule endpoints reject attempts to re-enable cron until Smart mode is off.
@@ -1795,26 +1804,26 @@ Example:
 
 ```json
 {
-  "enabled": true,
-  "maxParallel": 2,
-  "cooldownMinutes": { "min": 45, "max": 120 },
-  "searchTarget": { "min": 5, "max": 10 },
-  "searchNoise": 3,
-  "searchSafetyCap": 20,
-  "retry": { "maxAttempts": 3, "backoffMinutes": 15 },
-  "sessionTimeoutMinutes": 45,
-  "catchUpThresholdMinutes": 120,
-  "networkGroupOverride": { "2": "office-nat" },
-  "profiles": [
-    {
-      "accountIndex": 1,
-      "timezone": "Asia/Ho_Chi_Minh",
-      "windows": [{ "start": "07:00", "end": "23:00" }],
-      "quietHours": [{ "start": "12:00", "end": "13:00" }],
-      "deadline": "23:00",
-      "allowedWorkers": ["dailySet", "morePromotions", "activateSearchPerk", "claimBonusPoints"]
-    }
-  ]
+    "enabled": true,
+    "maxParallel": 2,
+    "cooldownMinutes": { "min": 45, "max": 120 },
+    "searchTarget": { "min": 5, "max": 10 },
+    "searchNoise": 3,
+    "searchSafetyCap": 20,
+    "retry": { "maxAttempts": 3, "backoffMinutes": 15 },
+    "sessionTimeoutMinutes": 45,
+    "catchUpThresholdMinutes": 120,
+    "networkGroupOverride": { "2": "office-nat" },
+    "profiles": [
+        {
+            "accountIndex": 1,
+            "timezone": "Asia/Ho_Chi_Minh",
+            "windows": [{ "start": "07:00", "end": "23:00" }],
+            "quietHours": [{ "start": "12:00", "end": "13:00" }],
+            "deadline": "23:00",
+            "allowedWorkers": ["dailySet", "morePromotions", "activateSearchPerk", "claimBonusPoints"]
+        }
+    ]
 }
 ```
 

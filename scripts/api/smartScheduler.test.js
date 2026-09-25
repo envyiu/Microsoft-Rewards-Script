@@ -67,10 +67,10 @@ test('confirmed zero quota completes the platform and is never planned again', (
     assert.equal(shouldPlanSearch({ ...result, failed: false }, result.probeUsed), false)
 })
 
-test('unavailable quota is stored as unknown and permits only the first daily probe', () => {
+test('unavailable quota remains pending for bounded scheduler retries', () => {
     const result = normalizeSearchResult({ remaining: 0, quotaAvailable: false })
     assert.deepEqual(result, { quotaKnown: false, remaining: null, complete: false, probeUsed: true })
-    assert.equal(shouldPlanSearch({ ...result, failed: false }, result.probeUsed), false)
+    assert.equal(shouldPlanSearch({ ...result, failed: false }, result.probeUsed), true)
     assert.equal(shouldPlanSearch({ quotaKnown: false, remaining: null, complete: false, failed: false }, false), true)
 })
 
@@ -196,6 +196,58 @@ test('a worker session only completes workers that emitted their completion even
     const state = scheduler.document.state.accounts[1]
     assert.deepEqual(state.workersCompleted, [])
     assert.equal(state.workerFailures.dailyCheckIn, 1)
+})
+
+test('unknown search quota stays pending and stops after the configured retry limit', () => {
+    const scheduler = Object.create(SmartScheduler.prototype)
+    scheduler.running = new Map()
+    scheduler.document = {
+        config: { cooldownMinutes: { min: 45, max: 45 }, retry: { maxAttempts: 1, backoffMinutes: 15 } },
+        state: {
+            accounts: {
+                1: {
+                    probeUsed: { mobile: false, desktop: false },
+                    platforms: {
+                        mobile: {
+                            failures: 0,
+                            failed: false,
+                            complete: false,
+                            quotaKnown: false,
+                            remaining: null,
+                            queries: 0,
+                            ewmaPointsPerQuery: 3
+                        }
+                    }
+                }
+            },
+            sessions: []
+        }
+    }
+    scheduler.suspended = false
+    scheduler._save = () => {}
+    scheduler.replan = () => {}
+    scheduler.emit = () => {}
+    const finishUnknown = id =>
+        scheduler._finish(
+            {
+                job: { id, accountIndex: 1, type: 'search', platform: 'mobile', attempts: 0 },
+                manager: { getStatus: () => ({ run: { accounts: [{ success: true }] } }) },
+                startedAt: new Date().toISOString(),
+                timeout: null,
+                timedOut: false,
+                searchResult: { queries: 1, points: 0, remaining: 0, quotaAvailable: false }
+            },
+            { code: 0 }
+        )
+
+    finishUnknown('search-1')
+    assert.equal(scheduler.document.state.accounts[1].platforms.mobile.failed, false)
+    assert.equal(scheduler.document.state.accounts[1].platforms.mobile.complete, false)
+    assert.equal(scheduler.document.state.sessions.at(-1).pending, true)
+    assert.equal(scheduler.document.state.sessions.at(-1).success, null)
+    finishUnknown('search-2')
+    assert.equal(scheduler.document.state.accounts[1].platforms.mobile.failed, true)
+    assert.equal(scheduler.document.state.accounts[1].platforms.mobile.complete, false)
 })
 
 test('fake child process reports a bounded smart search session through ProcessManager', async () => {

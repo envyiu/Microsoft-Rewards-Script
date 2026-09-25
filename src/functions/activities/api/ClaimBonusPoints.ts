@@ -24,6 +24,14 @@ export class ClaimBonusPoints extends BaseActivity {
             const { status, acknowledged } = await this.bot.browser.func.reportServerAction(actionId, [])
 
             const newBalance = await this.bot.browser.func.getCurrentPoints()
+            if (newBalance === null) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'CLAIM-BONUS-POINTS',
+                    `Claim response received but final balance is unknown | status=${status} | acknowledged=${acknowledged}`
+                )
+                return
+            }
             const gainedPoints = newBalance - oldBalance
 
             this.bot.logger.debug(

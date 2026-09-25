@@ -118,6 +118,9 @@ export function mapFlyoutToDashboard(data: RewardsFlyoutData): DashboardData {
         throw new Error(message)
     }
 
+    const availablePoints = finiteNonNegative(flyoutStatus.availablePoints, userInfo.balance)
+    if (availablePoints === null) throw new Error('Flyout response is missing a valid available-points balance')
+
     const counters = flyoutStatus.counters ?? {}
     const highValuePromotions = flyout.highValueActionPromotions ?? []
     const additionalPromotions = uniquePromotions([
@@ -132,7 +135,7 @@ export function mapFlyoutToDashboard(data: RewardsFlyoutData): DashboardData {
         ...flyout,
         userStatus: {
             ...flyoutStatus,
-            availablePoints: numberOrFallback(flyoutStatus.availablePoints, userInfo.balance),
+            availablePoints,
             lifetimePoints: numberOrFallback(flyoutStatus.lifetimePoints, 0),
             lifetimePointsRedeemed: numberOrFallback(flyoutStatus.lifetimePointsRedeemed, 0),
             lifetimeGivingPoints: numberOrFallback(flyoutStatus.lifetimeGivingPoints, userInfo.lifetimeGivingPoints),
@@ -172,6 +175,14 @@ function numberOrFallback(primary: unknown, fallback: unknown): number {
 
     const fallbackNumber = Number(fallback)
     return Number.isFinite(fallbackNumber) ? fallbackNumber : 0
+}
+
+function finiteNonNegative(primary: unknown, fallback: unknown): number | null {
+    for (const value of [primary, fallback]) {
+        const parsed = typeof value === 'number' ? value : Number.NaN
+        if (Number.isFinite(parsed) && parsed >= 0) return parsed
+    }
+    return null
 }
 
 function uniquePromotions(promotions: BasePromotion[]): BasePromotion[] {

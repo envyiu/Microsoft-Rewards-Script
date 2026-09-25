@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url)
 const ReactFunc = require('../../dist/browser/ReactFunc.js').default
 const BrowserFunc = require('../../dist/browser/BrowserFunc.js').default
 const { mapFlyoutToDashboard } = require('../../dist/browser/FlyoutDashboard.js')
+const { classifyRewardsPage, finiteNonNegative } = require('../../dist/browser/RewardsState.js')
 const { SearchProgress } = require('../../dist/functions/activities/search/SearchProgress.js')
 const { Search } = require('../../dist/functions/activities/search/BrowserSearch.js')
 
@@ -19,8 +20,10 @@ function earnPage(pointsCounters) {
 
 function flyout() {
     return {
-        userInfo: { isRewardsUser: true, profile: { attributes: {} } },
-        flyoutResult: { userStatus: { isRewardsUser: true, counters: { ActivityAndQuiz: [], DailyPoint: [] } } }
+        userInfo: { isRewardsUser: true, balance: 0, profile: { attributes: {} } },
+        flyoutResult: {
+            userStatus: { isRewardsUser: true, availablePoints: 0, counters: { ActivityAndQuiz: [], DailyPoint: [] } }
+        }
     }
 }
 
@@ -46,6 +49,148 @@ test('missing mobile counter means mobile search is not offered, not a shared qu
 test('rejects absent or malformed page counters instead of inventing 0/0', () => {
     assert.equal(parser.searchCountersFromEarnPage('<html>login redirect</html>'), null)
     assert.equal(parser.searchCountersFromEarnPage(earnPage({ pc: { max: 'oops', progress: 0 } })), null)
+})
+
+test('accepts a verified Rewards page without Daily Set or offers', () => {
+    const snapshot = {
+        offers: [],
+        reportable: [],
+        streaks: [],
+        streakProtection: null,
+        account: { level: 2, pointsProgress: null, pointsRemaining: null, lifetimeEarn: null, availablePoints: 0 }
+    }
+    assert.equal(
+        classifyRewardsPage({
+            url: 'https://rewards.bing.com/earn',
+            html: '<script>self.__next_f.push([1,"verified"])</script>',
+            snapshot,
+            actionCount: 2,
+            rewardsAccountConfirmed: true
+        }),
+        'rewards-ready'
+    )
+    assert.equal(finiteNonNegative(0), 0)
+    assert.equal(finiteNonNegative(-1), null)
+    assert.equal(finiteNonNegative(Number.NaN), null)
+})
+
+test('distinguishes loading, login, verification and locked Rewards routes', () => {
+    const empty = {
+        offers: [],
+        reportable: [],
+        streaks: [],
+        streakProtection: null,
+        account: { level: null, pointsProgress: null, pointsRemaining: null, lifetimeEarn: null, availablePoints: null }
+    }
+    const state = (url, html) =>
+        classifyRewardsPage({ url, html, snapshot: empty, actionCount: 0, rewardsAccountConfirmed: false })
+    assert.equal(state('https://rewards.bing.com/earn', '<script>self.__next_f.push([])</script>'), 'loading')
+    assert.equal(state('https://login.live.com/login.srf', '<input id="usernameEntry">'), 'login-required')
+    assert.equal(state('https://login.live.com/', '<div data-testid="codeEntry">'), 'verification-required')
+    assert.equal(state('https://rewards.bing.com/', '<h1 id="serviceAbuseLandingTitle">Locked</h1>'), 'unrecoverable')
+})
+
+test('flyout rejects missing or invalid balances but preserves a confirmed zero', () => {
+    assert.equal(mapFlyoutToDashboard(flyout()).dashboard.userStatus.availablePoints, 0)
+    const missing = flyout()
+    delete missing.userInfo.balance
+    delete missing.flyoutResult.userStatus.availablePoints
+    assert.throws(() => mapFlyoutToDashboard(missing), /available-points balance/)
+    const invalid = flyout()
+    invalid.userInfo.balance = -1
+    invalid.flyoutResult.userStatus.availablePoints = 'oops'
+    assert.throws(() => mapFlyoutToDashboard(invalid), /available-points balance/)
+})
+
+test('balance cache is isolated by account, platform and UTC day', () => {
+    let email = 'one@example.test'
+    let mobile = true
+    const bot = {
+        get currentAccountEmail() {
+            return email
+        },
+        get isMobile() {
+            return mobile
+        },
+        logger
+    }
+    const browserFunc = new BrowserFunc(bot)
+    browserFunc.rememberBalance(10, 'fixture')
+    assert.equal(browserFunc.cachedBalance().value, 10)
+
+    email = 'two@example.test'
+    assert.equal(browserFunc.cachedBalance(), null)
+    email = 'one@example.test'
+    mobile = false
+    assert.equal(browserFunc.cachedBalance(), null)
+    assert.equal([...browserFunc.pointCache.keys()].length, 1)
+})
+
+test('bootstrap retries a slow Rewards DOM and dismisses the welcome dialog without requiring Daily Set', async () => {
+    let attempt = 0
+    let welcomeClicks = 0
+    const empty = {
+        offers: [],
+        reportable: [],
+        streaks: [],
+        streakProtection: null,
+        account: { level: null, pointsProgress: null, pointsRemaining: null, lifetimeEarn: null, availablePoints: null }
+    }
+    const ready = {
+        ...empty,
+        account: { ...empty.account, level: 2, availablePoints: 0 }
+    }
+    const html = () =>
+        attempt < 2
+            ? '<html><script>self.__next_f.push([])</script></html>'
+            : '<html><script>self.__next_f.push([1,{"isRewardsUser":true,"availablePoints":0}])</script></html>'
+    const response = {
+        ok: () => true,
+        text: async () => html(),
+        status: () => 200
+    }
+    const page = {
+        goto: async () => {
+            attempt = 1
+        },
+        reload: async () => {
+            attempt += 1
+        },
+        url: () => 'https://rewards.bing.com/earn',
+        content: async () => html(),
+        request: { get: async () => response },
+        waitForSelector: async () =>
+            welcomeClicks === 0
+                ? {
+                      click: async () => {
+                          welcomeClicks += 1
+                      }
+                  }
+                : null,
+        waitForLoadState: async () => {}
+    }
+    const bot = {
+        isMobile: true,
+        logger,
+        nextActions: {},
+        nextRouterStateTree: '',
+        reactSnapshot: null,
+        reactSnapshots: { mobile: null, desktop: null },
+        browser: {
+            react: {
+                snapshotPage: () => (attempt < 2 ? empty : ready),
+                extractActionIds: () => ({ byName: {}, all: [] }),
+                buildId: () => 'fixture-build',
+                routerStateTree: () => 'fixture-router'
+            }
+        },
+        refreshCurrentRewardsContext: async () => false
+    }
+
+    await new BrowserFunc(bot).bootstrap(page)
+    assert.equal(attempt, 2)
+    assert.equal(welcomeClicks, 1)
+    assert.equal(bot.reactSnapshot.account.availablePoints, 0)
 })
 
 test('dashboard enrichment and search progress use the real platform-specific quotas', async () => {

@@ -183,8 +183,9 @@ export class ProcessManager extends EventEmitter {
         const run = summarizeRunState(this.runState)
         const accounts = run.accounts.map(a => ({
             email: a.email,
-            collected: a.collectedPoints ?? a.live.gained,
+            collected: a.success != null ? a.collectedPoints : a.live.gained,
             balance: a.live.balance ?? a.finalPoints ?? null,
+            reliability: a.reliability,
             initialPoints: a.initialPoints,
             bySource: a.live.bySource,
             earnable: a.earnable,
@@ -202,6 +203,7 @@ export class ProcessManager extends EventEmitter {
             startedAt: this.state === 'idle' ? null : this.startedAt,
             currentAccount: run.live.currentAccount,
             balance: run.live.currentBalance,
+            reliability: run.accounts.find(a => a.email === run.live.currentAccount)?.reliability ?? null,
             collected: run.collected,
             updatedAt: run.live.updatedAt,
             finished: run.finished,

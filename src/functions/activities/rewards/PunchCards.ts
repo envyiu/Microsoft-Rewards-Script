@@ -270,6 +270,14 @@ export class PunchCards extends BaseActivity {
             )
 
             const newBalance = await this.bot.browser.func.getCurrentPoints()
+            if (newBalance === null) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `Reported child but final balance is unknown | offerId=${child.offerId} | status=${status}`
+                )
+                return
+            }
             const gained = newBalance - oldBalance
             if (gained > 0) {
                 this.bot.userData.currentPoints = newBalance

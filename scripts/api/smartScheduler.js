@@ -157,7 +157,7 @@ export function normalizeSearchResult(result) {
 
 export function shouldPlanSearch(platformState, probeUsed) {
     if (platformState.complete || platformState.failed) return false
-    if (platformState.quotaKnown === false && probeUsed) return false
+    void probeUsed
     return true
 }
 
@@ -529,7 +529,9 @@ export class SmartScheduler extends EventEmitter {
     }
 
     enrollAccounts(accountIndexes = []) {
-        const indexes = [...new Set(accountIndexes.map(Number))].filter(index => Number.isSafeInteger(index) && index > 0)
+        const indexes = [...new Set(accountIndexes.map(Number))].filter(
+            index => Number.isSafeInteger(index) && index > 0
+        )
         if (!indexes.length) return this.get()
         const accounts = loadAccounts()
         const known = new Set(this.document.config.profiles.map(profile => profile.accountIndex))
@@ -653,16 +655,28 @@ export class SmartScheduler extends EventEmitter {
             job.type === 'workers' && accountSucceeded && exit.code === 0
                 ? job.workers.filter(worker => record.workerResults.has(worker))
                 : []
-        const missingWorkers = job.type === 'workers' ? job.workers.filter(worker => !completedWorkers.includes(worker)) : []
+        const missingWorkers =
+            job.type === 'workers' ? job.workers.filter(worker => !completedWorkers.includes(worker)) : []
+        const searchPending =
+            job.type === 'search' &&
+            exit.code === 0 &&
+            accountSucceeded &&
+            record.searchResult != null &&
+            record.searchResult.quotaAvailable !== true
         const succeeded =
             exit.code === 0 &&
             accountSucceeded &&
-            (job.type === 'search' ? record.searchResult != null : job.type === 'workers' ? missingWorkers.length === 0 : true)
+            (job.type === 'search'
+                ? record.searchResult != null && !searchPending
+                : job.type === 'workers'
+                  ? missingWorkers.length === 0
+                  : true)
         this.document.state.sessions.push({
             ...job,
             startedAt: record.startedAt,
             endedAt: new Date().toISOString(),
-            success: succeeded,
+            success: searchPending ? null : succeeded,
+            pending: searchPending,
             timedOut: record.timedOut,
             exit
         })
@@ -701,26 +715,33 @@ export class SmartScheduler extends EventEmitter {
                 }
                 state.workersFailed = [...new Set(state.workersFailed)]
             }
-        } else if (succeeded) {
-            if (job.type === 'search') {
-                const platform = state.platforms[job.platform]
-                const result = record.searchResult
-                platform.failures = 0
-                platform.lastRunAt = new Date().toISOString()
-                platform.cooldownUntil = new Date(
-                    Date.now() + randomMinutes(this.document.config.cooldownMinutes) * 60_000
-                ).toISOString()
-                if (result) {
-                    const normalized = normalizeSearchResult(result)
-                    platform.queries += result.queries
-                    platform.quotaKnown = normalized.quotaKnown
-                    platform.remaining = normalized.remaining
-                    platform.complete = normalized.complete
-                    state.probeUsed[job.platform] = normalized.probeUsed
-                    if (result.queries > 0 && result.points > 0)
-                        platform.ewmaPointsPerQuery =
-                            platform.ewmaPointsPerQuery * 0.7 + (result.points / result.queries) * 0.3
+        } else if (job.type === 'search' && exit.code === 0 && accountSucceeded && record.searchResult) {
+            const platform = state.platforms[job.platform]
+            const result = record.searchResult
+            platform.lastRunAt = new Date().toISOString()
+            platform.cooldownUntil = new Date(
+                Date.now() + randomMinutes(this.document.config.cooldownMinutes) * 60_000
+            ).toISOString()
+            if (result) {
+                const normalized = normalizeSearchResult(result)
+                platform.queries += result.queries
+                platform.quotaKnown = normalized.quotaKnown
+                platform.remaining = normalized.remaining
+                platform.complete = normalized.complete
+                state.probeUsed[job.platform] = normalized.probeUsed
+                if (normalized.quotaKnown) {
+                    platform.failures = 0
+                    platform.failed = false
+                } else {
+                    platform.failures += 1
+                    platform.failed = platform.failures > this.document.config.retry.maxAttempts
+                    platform.cooldownUntil = new Date(
+                        Date.now() + this.document.config.retry.backoffMinutes * 60_000 * platform.failures
+                    ).toISOString()
                 }
+                if (result.queries > 0 && result.points > 0)
+                    platform.ewmaPointsPerQuery =
+                        platform.ewmaPointsPerQuery * 0.7 + (result.points / result.queries) * 0.3
             }
         } else {
             const platform = state.platforms[job.platform]

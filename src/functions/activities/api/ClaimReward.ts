@@ -54,6 +54,14 @@ export class ClaimReward extends BaseActivity {
             )
 
             const newBalance = await this.bot.browser.func.getCurrentPoints()
+            if (newBalance === null) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'CLAIM-REWARD',
+                    `Claim acknowledged but final balance is unknown | offerId=${child.offerId} | status=${status}`
+                )
+                return
+            }
             const gained = newBalance - oldBalance
 
             this.bot.logger.debug(
