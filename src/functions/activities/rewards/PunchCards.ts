@@ -1,3 +1,6 @@
+import { creditedPoints, pointDelta } from '../../../util/PointAccounting'
+import { readPunchCardParents, readPunchCardPage } from '../../../browser/parsers/PunchCardPageParser'
+import { waitForActivity } from '../../../util/ActivityTiming'
 import { URLs } from '../../../constants/urls'
 import { BaseActivity } from '../BaseActivity'
 import type { ParentQuest, QuestChild } from '../../../browser/ReactFunc'
@@ -23,6 +26,7 @@ export class PunchCards extends BaseActivity {
         try {
             data = await this.bot.browser.func.getDashboardData(this.bot.cookies.desktop)
         } catch (error) {
+            this.bot.logger.markWorkerFailure()
             this.bot.logger.warn(
                 'main',
                 'PUNCHCARD',
@@ -43,7 +47,8 @@ export class PunchCards extends BaseActivity {
     }
 
     private async run(data: DashboardData): Promise<void> {
-        const parents = await this.getParentQuests()
+        this.bot.punchCardsVerified = false
+        const parents = await this.getParentQuests(true)
         if (!parents) return
 
         const apiById = new Map(
@@ -55,10 +60,13 @@ export class PunchCards extends BaseActivity {
         this.mergeApiParents(parents, apiById)
         const pending = parents.filter(parent => {
             if (parent.complete) return false
-            return !this.bot.config.skipNonPointTasks || parent.pointProgressMax > 0
+            // Activation steps and app quests often have no points on the
+            // parent card. The child lifecycle decides what is executable.
+            return true
         })
 
         if (!pending.length) {
+            this.bot.punchCardsVerified = parents.length > 0
             this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', 'No actionable quests')
             return
         }
@@ -69,10 +77,12 @@ export class PunchCards extends BaseActivity {
             `Found ${pending.length} incomplete quest(s) | apiMatched=${pending.filter(parent => apiById.has(parent.offerId)).length}`
         )
 
+        let verified = true
         for (const parent of pending) {
             try {
-                await this.solvePunchCard(parent, apiById.get(parent.offerId))
+                if (!(await this.solvePunchCard(parent, apiById.get(parent.offerId)))) verified = false
             } catch (error) {
+                verified = false
                 this.bot.logger.error(
                     this.bot.isMobile,
                     'PUNCHCARD',
@@ -83,23 +93,35 @@ export class PunchCards extends BaseActivity {
             }
         }
 
+        this.bot.punchCardsVerified = verified
+
         this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', 'Finished processing quests')
     }
 
-    private async getParentQuests(): Promise<ParentQuest[] | null> {
+    private async getParentQuests(rendered = false): Promise<ParentQuest[] | null> {
         try {
             const earn = await this.bot.browser.func.getRewardsPageHtml(URLs.rewards.earn, '/earn')
             if (!earn) {
+                this.bot.logger.markWorkerFailure()
                 this.bot.logger.warn(this.bot.isMobile, 'PUNCHCARD', '/earn unavailable - cannot list quests')
                 return null
             }
 
             const parents = this.bot.browser.react.snapshotQuestList(earn)
+            if (rendered && this.bot.browser.func.withRewardsPage) {
+                const visible = await this.bot.browser.func.withRewardsPage(URLs.rewards.earn, readPunchCardParents)
+                for (const card of visible ?? []) {
+                    const existing = parents.find(parent => parent.offerId === card.offerId)
+                    if (existing) Object.assign(existing, card)
+                    else parents.push(card)
+                }
+            }
             if (parents.length) return parents
 
             const dashboard = await this.bot.browser.func.getRewardsPageHtml(URLs.rewards.dashboard, '/dashboard')
             return dashboard ? this.bot.browser.react.snapshotQuestList(earn, dashboard) : parents
         } catch (error) {
+            this.bot.logger.markWorkerFailure()
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'PUNCHCARD',
@@ -131,81 +153,123 @@ export class PunchCards extends BaseActivity {
         }
     }
 
-    private async solvePunchCard(parent: ParentQuest, apiCard: PunchCard | undefined): Promise<void> {
+    private async solvePunchCard(parent: ParentQuest, apiCard: PunchCard | undefined): Promise<boolean> {
         const parentId = parent.offerId
         const title = parent.title || apiCard?.parentPromotion?.title || parentId
-        const children = await this.getQuestChildren(parentId, title)
-        if (!children) return
+        let children = await this.getQuestChildren(parentId, title)
+        if (!children) return false
 
         const apiChildById = new Map(
             (apiCard?.childPromotions ?? [])
                 .filter(child => child.offerId)
                 .map(child => [child.offerId, child] as const)
         )
-        const ordered = [...children].sort(
-            (left, right) =>
-                (apiChildById.get(left.offerId)?.priority ?? Number.MAX_SAFE_INTEGER) -
-                (apiChildById.get(right.offerId)?.priority ?? Number.MAX_SAFE_INTEGER)
-        )
-
-        this.bot.logger.info(
-            this.bot.isMobile,
-            'PUNCHCARD',
-            `Solving "${title}" | children=${ordered.length} | reportable=${ordered.filter(child => child.reportable).length}`
-        )
-
         const startBalance = this.bot.userData.currentPoints
         let reported = 0
-        let remaining = 0
-
-        for (const child of ordered) {
-            const apiChild = apiChildById.get(child.offerId)
-
-            if (!child.reportable) {
-                remaining += 1
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'PUNCHCARD',
-                    `Skip ${child.offerId}: not reportable (locked=${child.isLocked} disabled=${child.isDisabled} done=${child.isCompleted} hash=${Boolean(child.hash)})`
+        const attempted = new Set<string>()
+        const confirmed = new Set<string>()
+        let completedTasks = parent.completedTasks
+        // Activation and later unlocks must be read from a new response. Never
+        // resend one child just because an acknowledgment did not credit points.
+        while (attempted.size < 32) {
+            const next = [...children]
+                .sort(
+                    (a, b) =>
+                        Number(!/activate|start.*quest/i.test(a.title ?? a.offerId)) -
+                            Number(!/activate|start.*quest/i.test(b.title ?? b.offerId)) ||
+                        (apiChildById.get(a.offerId)?.priority ?? 999) - (apiChildById.get(b.offerId)?.priority ?? 999)
                 )
-                continue
-            }
-
-            if (this.isSearchQuotaChild(child.offerId, apiChild)) {
-                remaining += 1
-                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `Skip ${child.offerId}: multi-day search task`)
-                continue
-            }
-
+                .find(
+                    child =>
+                        !attempted.has(child.offerId) &&
+                        this.childReason(child, apiChildById.get(child.offerId)) === 'actionable'
+                )
+            if (!next) break
+            const child = next
+            const apiChild = apiChildById.get(child.offerId)
+            attempted.add(child.offerId)
             if (this.isClaimChild(child.offerId, apiChild)) {
-                if (!this.bot.config.autoClaimPunchcardRewards) {
-                    remaining += 1
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        'PUNCHCARD',
-                        `Reward for "${title}" is ready for manual redemption | offerId=${child.offerId}`
-                    )
-                    continue
-                }
                 await this.bot.activities.doClaimReward(child, parentId)
             } else {
-                await this.reportQuestChild(child, parentId)
+                if (await this.reportQuestChild(child, parentId)) reported += 1
             }
-
-            reported += 1
-            await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 15000))
+            await waitForActivity(this.bot, this.bot.utils.randomDelay(5000, 15000))
+            const fresh = await this.getQuestChildren(parentId, title)
+            const freshParent = (await this.getParentQuests())?.find(p => p.offerId === parentId)
+            if (freshParent?.complete) {
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `Quest "${title}" COMPLETE | verified=true | reported=${reported}`
+                )
+                return true
+            }
+            if (
+                completedTasks !== undefined &&
+                freshParent?.completedTasks !== undefined &&
+                freshParent.completedTasks > completedTasks &&
+                fresh &&
+                !fresh.some(item => item.offerId === child.offerId)
+            )
+                confirmed.add(child.offerId)
+            completedTasks = freshParent?.completedTasks ?? completedTasks
+            if (!fresh) {
+                return false
+            }
+            for (const item of fresh) if (item.isCompleted) confirmed.add(item.offerId)
+            children = fresh
         }
-
+        const refreshedParents = await this.getParentQuests()
+        const complete = refreshedParents?.some(p => p.offerId === parentId && p.complete) === true
+        const unconfirmed = [...attempted].filter(id => !confirmed.has(id) && !complete)
+        for (const child of children)
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `Quest step | quest=${parentId} | offerId=${child.offerId} | reason=${this.childReason(child, apiChildById.get(child.offerId))}`
+            )
+        const unresolved = children.some(child =>
+            ['actionable', 'missing-hash', 'unsupported'].includes(
+                this.childReason(child, apiChildById.get(child.offerId))
+            )
+        )
+        const verified =
+            complete ||
+            (refreshedParents?.some(p => p.offerId === parentId) === true && unconfirmed.length === 0 && !unresolved)
         const gained = this.bot.userData.currentPoints - startBalance
         this.bot.logger.info(
             this.bot.isMobile,
             'PUNCHCARD',
-            `Quest "${title}" ${remaining === 0 ? 'COMPLETE' : 'in progress'} | reported=${reported}` +
-                `${remaining ? ` | remaining=${remaining}` : ''} | pointsGained=${gained}` +
+            `Quest "${title}" ${complete ? 'COMPLETE' : 'in progress'} | reported=${reported} | verified=${verified}` +
+                ` | unconfirmed=${unconfirmed.length} | pointsGained=${gained}` +
                 ` | currentBalance=${this.bot.userData.currentPoints}` +
                 `${parent.pointProgressMax > 0 ? ` | targetPoints=${parent.pointProgressMax}` : ''}`,
             gained > 0 ? 'green' : undefined
         )
+        return verified
+    }
+
+    private childReason(child: QuestChild, promotion?: BasePromotion): string {
+        if (child.isCompleted) return 'completed'
+        if (child.isLocked) return 'locked-prerequisite'
+        if (child.isDisabled) return 'disabled'
+        const text = `${child.title ?? ''} ${child.description ?? ''} ${child.unlockCriteria ?? ''}`
+        if (
+            this.isSearchQuotaChild(child.offerId, promotion) ||
+            /(?:\d+\s*(?:out of|of)\s*\d+\s*days|24\s*hours? apart|search[\s\S]{0,100}\b(?:[2-9]|\d{2,}|seven|five|three)\s+days\b)/i.test(
+                text
+            )
+        )
+            return 'waiting-day-or-search'
+        if (/rewardsapp.*(?:weekly|exclusive)|bing\.com\/apps\//i.test(`${child.offerId} ${child.destination ?? ''}`))
+            return 'requires-app'
+        if (this.isClaimChild(child.offerId, promotion) && !this.bot.config.autoClaimPunchcardRewards)
+            return 'manual-claim'
+        if (!child.hash) return 'missing-hash'
+        const type = (child.promotionType || promotion?.promotionType || '').toLowerCase()
+        if (type && !['urlreward', 'quiz', 'poll', 'puzzle', 'claim', 'redeem'].includes(type) && !child.activityType)
+            return 'unsupported'
+        return child.reportable ? 'actionable' : 'disabled'
     }
 
     private async getQuestChildren(parentId: string, title: string): Promise<QuestChild[] | null> {
@@ -218,6 +282,26 @@ export class PunchCards extends BaseActivity {
             }
 
             const children = this.bot.browser.react.snapshotQuestPage(html)
+            // v5 rendered fallback also covers streamed pages missing signed CTA props.
+            if (!children.length && this.bot.browser.func.withRewardsPage) {
+                const rendered = await this.bot.browser.func.withRewardsPage(questUrl, async page => ({
+                    children: this.bot.browser.react.snapshotQuestPage(await page.content()),
+                    page: await readPunchCardPage(page)
+                }))
+                if (rendered) for (const child of rendered.children) {
+                    const candidates = rendered.page.steps.filter(step => step.offerId
+                        ? step.offerId === child.offerId
+                        : step.controlName === child.title && step.destination === child.destination)
+                    if (candidates.length === 1) {
+                        const step = candidates[0]!
+                        child.description ||= step.description
+                        child.isCompleted ||= step.complete
+                        child.isDisabled ||= step.disabled
+                        child.reportable &&= !child.isCompleted && !child.isDisabled
+                    }
+                    children.push(child)
+                }
+            }
             if (!children.length) {
                 this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `No actionable children for "${title}"`)
                 return null
@@ -233,7 +317,7 @@ export class PunchCards extends BaseActivity {
         }
     }
 
-    private async reportQuestChild(child: QuestChild, parentId: string): Promise<void> {
+    private async reportQuestChild(child: QuestChild, parentId: string): Promise<boolean> {
         const actionId = this.bot.nextActions.reportActivity
         if (!actionId) {
             this.bot.logger.warn(
@@ -241,11 +325,11 @@ export class PunchCards extends BaseActivity {
                 'PUNCHCARD',
                 `Skip ${child.offerId}: "reportActivity" was not discovered`
             )
-            return
+            return false
         }
         if (!child.hash) {
             this.bot.logger.warn(this.bot.isMobile, 'PUNCHCARD', `Skip ${child.offerId}: no live hash`)
-            return
+            return false
         }
 
         const oldBalance = this.bot.userData.currentPoints
@@ -255,15 +339,16 @@ export class PunchCards extends BaseActivity {
                 actionId,
                 [
                     child.hash,
-                    11,
+                    child.activityType ?? 11,
                     {
                         offerid: child.offerId,
-                        isPromotional: '$undefined',
+                        isPromotional: child.isPromotional ? 'true' : '$undefined',
                         timezoneOffset: this.bot.userData.timezoneOffset
                     }
                 ],
                 {
                     url: questUrl,
+                    browserFallback: true,
                     referer: questUrl,
                     routerStateTree: this.bot.browser.react.questRouterStateTree(parentId)
                 }
@@ -276,10 +361,14 @@ export class PunchCards extends BaseActivity {
                     'PUNCHCARD',
                     `Reported child but final balance is unknown | offerId=${child.offerId} | status=${status}`
                 )
-                return
+                return acknowledged
             }
-            const gained = newBalance - oldBalance
-            if (gained > 0) {
+            const freshHtml = await this.bot.browser.func.getRewardsPageHtml(questUrl, `/earn/quest/${parentId}`)
+            const fresh = freshHtml ? this.bot.browser.react.snapshotQuestPage(freshHtml).find(item => item.offerId === child.offerId) : undefined
+            const progress = fresh && fresh.points === child.points ? pointDelta(child.pointProgress, fresh.pointProgress) : null
+            const gained = acknowledged ? creditedPoints(progress, oldBalance, newBalance) : null
+            this.bot.userData.currentPoints = newBalance
+            if (gained !== null && gained > 0) {
                 this.bot.userData.currentPoints = newBalance
                 this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
             }
@@ -288,9 +377,10 @@ export class PunchCards extends BaseActivity {
                 this.bot.isMobile,
                 'PUNCHCARD',
                 `Reported child | offerId=${child.offerId} | status=${status} | acknowledged=${acknowledged}` +
-                    ` | pointsGained=${gained} | currentBalance=${newBalance}`,
-                gained > 0 || acknowledged ? 'green' : undefined
+                    ` | pointsGained=${gained ?? 'unknown'} | currentBalance=${newBalance} | creditVerified=${gained !== null}`,
+                gained !== null && gained > 0 ? 'green' : undefined
             )
+            return acknowledged
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,
@@ -299,6 +389,7 @@ export class PunchCards extends BaseActivity {
                     error instanceof Error ? error.message : String(error)
                 }`
             )
+            return false
         }
     }
 
@@ -306,15 +397,18 @@ export class PunchCards extends BaseActivity {
         if (promotion) {
             const type = (promotion.promotionType ?? '').toLowerCase()
             const attributeType = String(this.getAttribute(promotion, 'type') ?? '').toLowerCase()
-            const progressMax = Number(promotion.activityProgressMax ?? 0)
-            if (type === 'search' || attributeType === 'search' || progressMax > 1) return true
+            if (type === 'search' || attributeType === 'search') return true
         }
-        return /search/i.test(offerId) && /(day|streak|\dx)/i.test(offerId)
+        return (
+            /(?:^|[_-])search(?:[_-]|$)/i.test(offerId) ||
+            (/search/i.test(offerId) && /(day|streak|\dx)/i.test(offerId))
+        )
     }
 
     private isClaimChild(offerId: string, promotion?: BasePromotion): boolean {
+        if (['claim', 'redeem'].includes((promotion?.promotionType ?? '').toLowerCase())) return true
         if (/\/redeem\//.test((promotion?.destinationUrl ?? '').toLowerCase())) return true
-        return /(redeem|claim|(?<!url)reward)/i.test(offerId)
+        return /(?:^|[_-])(?:redeem|claim|reward)(?:[_-]|$)/i.test(offerId)
     }
 
     private getAttribute(promotion: BasePromotion, key: string): unknown {

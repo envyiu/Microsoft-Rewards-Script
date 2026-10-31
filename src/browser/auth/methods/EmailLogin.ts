@@ -8,10 +8,12 @@ export class EmailLogin {
 
     async enterEmail(page: Page, email: string): Promise<'ok' | 'error'> {
         try {
+            if (this.bot.shuttingDown) return 'error'
             const emailInputSelector = 'input[type="email"]'
             const emailField = await page
                 .waitForSelector(emailInputSelector, { state: 'visible', timeout: 1000 })
                 .catch(() => {})
+            if (this.bot.shuttingDown) return 'error'
             if (!emailField) {
                 this.bot.logger.warn(this.bot.isMobile, 'LOGIN-ENTER-EMAIL', 'Email field not found')
                 return 'error'
@@ -34,6 +36,7 @@ export class EmailLogin {
             const submitButton = await page
                 .waitForSelector(this.submitButton, { state: 'visible', timeout: 2000 })
                 .catch(() => null)
+            if (this.bot.shuttingDown) return 'error'
             if (!submitButton) {
                 this.bot.logger.warn(this.bot.isMobile, 'LOGIN-ENTER-EMAIL', 'Submit button not found')
                 return 'error'
@@ -48,6 +51,7 @@ export class EmailLogin {
 
             return 'ok'
         } catch (error) {
+            if (this.bot.shuttingDown) return 'error'
             this.bot.logger.error(
                 this.bot.isMobile,
                 'LOGIN-ENTER-EMAIL',

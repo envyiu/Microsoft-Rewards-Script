@@ -1,3 +1,4 @@
+import { waitForActivity } from '../../../util/ActivityTiming'
 import { BaseActivity } from '../BaseActivity'
 
 import type { ParsedOffer, StreakState } from '../../../browser/ReactFunc'
@@ -53,6 +54,7 @@ export class VisualSearch extends BaseActivity {
 
         const available = streak?.isEnabled === true || activation === 'activated' || activation === 'already-active'
         if (!available) {
+            if (activation === 'failed') this.bot.logger.markWorkerFailure()
             this.bot.logger.info(
                 this.bot.isMobile,
                 'VISUAL-SEARCH',
@@ -179,7 +181,7 @@ export class VisualSearch extends BaseActivity {
                 }
             ])
 
-            await this.bot.utils.wait(this.bot.utils.randomDelay(3000, 6000))
+            await waitForActivity(this.bot, this.bot.utils.randomDelay(3000, 6000))
             const confirmed = await this.confirmActivation(offer.offerId)
 
             if (acknowledged || confirmed) {
@@ -414,7 +416,7 @@ export class VisualSearch extends BaseActivity {
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             const visual = await this.acquireFreshVisualSearch(seenBcids, candidateSeeds, attempt)
             if (!visual) {
-                await this.bot.utils.wait(this.bot.utils.randomDelay(3000, 6000))
+                await waitForActivity(this.bot, this.bot.utils.randomDelay(3000, 6000))
                 continue
             }
 
@@ -458,9 +460,10 @@ export class VisualSearch extends BaseActivity {
                 )
             }
 
-            await this.bot.utils.wait(this.bot.utils.randomDelay(3000, 6000))
+            await waitForActivity(this.bot, this.bot.utils.randomDelay(3000, 6000))
         }
 
+        this.bot.logger.markWorkerFailure()
         this.bot.logger.warn(
             this.bot.isMobile,
             'VISUAL-SEARCH',
@@ -503,7 +506,7 @@ export class VisualSearch extends BaseActivity {
                 'VISUAL-SEARCH',
                 `Skipping already-tried bcid=${visual.bcid.slice(0, 14)} | candidatesRemaining=${candidateSeeds.length}`
             )
-            await this.bot.utils.wait(this.bot.utils.randomDelay(1000, 2000))
+            await waitForActivity(this.bot, this.bot.utils.randomDelay(1000, 2000))
         }
 
         this.bot.logger.warn(
@@ -517,7 +520,7 @@ export class VisualSearch extends BaseActivity {
     private async waitForDayRegistration(): Promise<boolean> {
         for (let check = 1; check <= REGISTRATION_CHECKS; check++) {
             if (check > 1) {
-                await this.bot.utils.wait(this.bot.utils.randomDelay(2000, 4000))
+                await waitForActivity(this.bot, this.bot.utils.randomDelay(2000, 4000))
             }
             if (await this.dayRegistered()) return true
         }

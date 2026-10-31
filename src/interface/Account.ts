@@ -3,6 +3,7 @@ export interface Account {
     password: string
     totpSecret?: string
     recoveryEmail: string
+    newAccountMode?: boolean
     geoLocale: string
     langCode: string
     proxy: AccountProxy

@@ -9,6 +9,10 @@ services:
         volumes:
             - ./config:/usr/src/microsoft-rewards-script/config
             - ./sessions:/usr/src/microsoft-rewards-script/sessions
+            # Host Damru bridge socket (created with mode 0600 by the
+            # graphical-session service). Set DAMRU_BRIDGE_SOCKET_DIR to the
+            # directory containing bridge.sock on the Docker host.
+            - ${DAMRU_BRIDGE_SOCKET_DIR:-./run/damru}:/run/damru
         env_file:
             # Load account credentials from the .env file (ACCOUNT_1_EMAIL, optional ACCOUNT_1_PASSWORD, etc.)
             - path: .env
@@ -16,6 +20,7 @@ services:
             # ── Scheduler ──────────────────────────────────────
             TZ: 'America/Toronto'
             NODE_ENV: 'production'
+            DAMRU_BRIDGE_SOCKET: '/run/damru/bridge.sock'
             # CRON_SCHEDULE is the *initial* default. It will run as default unless changed by the API
             # API schedule changes are saved to ./config/schedule.json, delete
             # that file to revert to the base CRON_SCHEDULE again.

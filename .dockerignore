@@ -12,3 +12,13 @@ accounts.dev.json
 accounts.main.json
 config.json
 .playwright-chromium-installed
+
+# Private state and independent deployment artifacts
+.env
+.env.*
+worker.env
+manager.env
+*.bak
+config/hybrid/
+config/smart-schedule.json
+releases/

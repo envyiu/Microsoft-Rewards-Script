@@ -4,6 +4,7 @@ import { URLSearchParams } from 'url'
 
 import { URLs } from '../../../constants/urls'
 import type { MicrosoftRewardsBot } from '../../../index'
+import { isAccountReviewUrl, safeAuthorizationLocation } from '../AuthorizationRoute'
 
 interface TokenResponse {
     access_token?: string
@@ -16,6 +17,7 @@ export class MobileAccessLogin {
     private authUrl = URLs.auth.oauthAuthorize
     private redirectUrl = URLs.auth.oauthRedirect
     private tokenUrl = URLs.auth.oauthToken
+    private authorizationNeedsReview = false
     private scope = 'service::prod.rewardsplatform.microsoft.com::MBI_SSL'
 
     constructor(
@@ -24,6 +26,7 @@ export class MobileAccessLogin {
     ) {}
 
     async get(email: string): Promise<string> {
+        this.authorizationNeedsReview = false
         try {
             const authorizeUrl = new URL(this.authUrl)
             authorizeUrl.searchParams.append('response_type', 'code')
@@ -54,7 +57,9 @@ export class MobileAccessLogin {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'LOGIN-APP',
-                    'Could not resolve mobile OAuth code - app activities will be skipped this run'
+                    this.authorizationNeedsReview
+                        ? 'Mobile OAuth encountered an account-review redirect and browser authorization did not complete; app activities remain pending'
+                        : 'Could not resolve mobile OAuth code - app activities will be retried by the scheduler'
                 )
                 return ''
             }
@@ -112,6 +117,12 @@ export class MobileAccessLogin {
                 `OAuth request resolved → ${this.safeUrl(finalUrl)} (status ${response.status()})`
             )
 
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'LOGIN-APP',
+                `OAuth request result | location=${safeAuthorizationLocation(finalUrl)} | status=${response.status()} | code=${this.extractCode(finalUrl) ? 'present' : 'missing'}`
+            )
+            if (isAccountReviewUrl(finalUrl)) this.authorizationNeedsReview = true
             return this.extractCode(finalUrl)
         } catch (error) {
             this.bot.logger.debug(
@@ -127,16 +138,26 @@ export class MobileAccessLogin {
         let oauthPage: Page | null = null
 
         try {
-            oauthPage = await this.page.context().newPage()
+            oauthPage = await this.bot.newBrowserPage(this.page.context())
             await oauthPage.goto(authorizeUrl.href, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
+            if (this.reviewRequired(oauthPage.url())) return ''
             let code = this.extractCode(oauthPage.url())
             if (code) return code
 
             await oauthPage
-                .waitForURL(url => url.pathname.toLowerCase() === '/oauth20_desktop.srf', { timeout: 30000 })
+                .waitForURL(
+                    url => url.pathname.toLowerCase() === '/oauth20_desktop.srf' || isAccountReviewUrl(url.href),
+                    { timeout: 30000 }
+                )
                 .catch(() => {})
 
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'LOGIN-APP',
+                `OAuth browser result | location=${safeAuthorizationLocation(oauthPage.url())} | code=${this.extractCode(oauthPage.url()) ? 'present' : 'missing'}`
+            )
+            if (this.reviewRequired(oauthPage.url())) return ''
             code = this.extractCode(oauthPage.url())
             this.bot.logger.debug(
                 this.bot.isMobile,
@@ -155,6 +176,17 @@ export class MobileAccessLogin {
         } finally {
             await oauthPage?.close().catch(() => {})
         }
+    }
+
+    private reviewRequired(rawUrl: string): boolean {
+        if (!isAccountReviewUrl(rawUrl)) return false
+        this.authorizationNeedsReview = true
+        this.bot.logger.warn(
+            this.bot.isMobile,
+            'LOGIN-APP',
+            'Mobile app authorization redirected to account.live.com/Abuse; stopping repeated authorization attempts for this run'
+        )
+        return true
     }
 
     private extractCode(rawUrl: string): string {

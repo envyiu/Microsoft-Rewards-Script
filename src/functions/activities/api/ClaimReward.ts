@@ -1,3 +1,4 @@
+import { creditedPoints, pointDelta } from '../../../util/PointAccounting'
 import type { QuestChild } from '../../../browser/ReactFunc'
 import { BaseActivity } from '../BaseActivity'
 import { URLs } from '../../../constants/urls'
@@ -62,16 +63,19 @@ export class ClaimReward extends BaseActivity {
                 )
                 return
             }
-            const gained = newBalance - oldBalance
+            const freshHtml = await this.bot.browser.func.getRewardsPageHtml(questUrl, `/earn/quest/${parentId}`)
+            const fresh = freshHtml ? this.bot.browser.react.snapshotQuestPage(freshHtml).find(item => item.offerId === child.offerId) : undefined
+            const progress = fresh && fresh.points === child.points ? pointDelta(child.pointProgress, fresh.pointProgress) : null
+            const gained = acknowledged ? creditedPoints(progress, oldBalance, newBalance) : null
 
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'CLAIM-REWARD',
-                `Claim response | offerId=${offerId} | status=${status} | acknowledged=${acknowledged} | pointsGained=${gained} | currentBalance=${newBalance}`
+                `Claim response | offerId=${offerId} | status=${status} | acknowledged=${acknowledged} | pointsGained=${gained ?? 'unknown'} | currentBalance=${newBalance}`
             )
 
             if (acknowledged) {
-                if (gained > 0) {
+                if (gained !== null && gained > 0) {
                     this.bot.userData.currentPoints = newBalance
                     this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
                 }
@@ -79,8 +83,8 @@ export class ClaimReward extends BaseActivity {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'CLAIM-REWARD',
-                    `Reward claimed | offerId=${offerId} | status=${status} | pointsGained=${gained} | currentBalance=${newBalance}`,
-                    'green'
+                    `${fresh?.isCompleted ? 'Reward claimed' : 'Claim accepted; completion unverified'} | offerId=${offerId} | status=${status} | pointsGained=${gained ?? 'unknown'} | currentBalance=${newBalance}`,
+                    gained !== null && gained > 0 ? 'green' : undefined
                 )
             } else {
                 this.bot.logger.warn(

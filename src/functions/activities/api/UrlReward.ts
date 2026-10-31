@@ -1,3 +1,4 @@
+import { verifyOffer } from './OfferVerification'
 import { URLs } from '../../../constants/urls'
 import type { BasePromotion } from '../../../interface/DashboardData'
 import { BaseActivity } from '../BaseActivity'
@@ -69,14 +70,16 @@ export class UrlReward extends BaseActivity {
                     activityType,
                     {
                         offerid: offerId,
-                        isPromotional: live.isPromotional ? true : '$undefined',
+                        // Match the Rewards client's server-action argument type.
+                        isPromotional: live.isPromotional ? 'true' : '$undefined',
                         timezoneOffset: this.bot.userData.timezoneOffset
                     }
                 ],
                 {
-                    url: URLs.rewards.dashboard,
-                    referer: URLs.rewards.dashboard,
-                    routerStateTree: this.bot.browser.react.routerStateTree('dashboard')
+                    browserFallback: true,
+                    url: URLs.rewards.earn,
+                    referer: URLs.rewards.earn,
+                    routerStateTree: this.bot.nextRouterStateTree || this.bot.browser.react.routerStateTree('earn')
                 }
             )
 
@@ -89,48 +92,22 @@ export class UrlReward extends BaseActivity {
                 if (await this.retryAfterRequestFailure(promotion, allowSessionRepair)) return
             }
 
-            const newBalance = availablePoints ?? (await this.bot.browser.func.getCurrentPoints())
-            if (newBalance === null) {
-                this.bot.logger.warn(
-                    this.bot.isMobile,
-                    'URL-REWARD',
-                    `UrlReward acknowledged but final balance is unknown | offerId=${offerId} | status=${status}`
-                )
-                return
-            }
-            const gainedPoints = newBalance - oldBalance
-
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'URL-REWARD',
-                `Response | offerId=${offerId} | status=${status} | acknowledged=${acknowledged} | pointsGained=${gainedPoints} | currentBalance=${newBalance}`
-            )
-
-            if (gainedPoints > 0) {
-                this.bot.userData.currentPoints = newBalance
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-
-                const shortfall = expectedPoints > 0 && gainedPoints < expectedPoints
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'URL-REWARD',
-                    `Completed UrlReward | offerId=${offerId} | pointsGained=${gainedPoints} | currentBalance=${newBalance}${shortfall ? ' | WARNING: credited less than advertised' : ''}`,
-                    'green'
-                )
-            } else if (acknowledged && expectedPoints === 0) {
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'URL-REWARD',
-                    `Completed UrlReward (no points by design) | offerId=${offerId} | acknowledged=true | pointsGained=0 | currentBalance=${newBalance}`,
-                    'green'
-                )
+            if (!acknowledged) return
+            const verification = await verifyOffer(this.bot, live, oldBalance, availablePoints)
+            const { complete, gained, balance } = verification
+            if (balance !== null) this.bot.userData.currentPoints = balance
+            if (gained !== null && gained > 0)
+                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
+            const message = `offerId=${offerId} | acknowledged=true | expected=${expectedPoints}` +
+                ` | pointsGained=${gained ?? 'unknown'} | currentBalance=${balance ?? 'unknown'}` +
+                ` | completionVerified=${complete} | creditVerified=${gained !== null}`
+            if (complete) {
+                this.bot.logger.info(this.bot.isMobile, 'URL-REWARD',
+                    `Completed UrlReward | ${message}`, gained !== null && gained > 0 ? 'green' : undefined)
             } else {
-                this.bot.logger.warn(
-                    this.bot.isMobile,
-                    'URL-REWARD',
-                    `UrlReward credited no points | offerId=${offerId} | acknowledged=${acknowledged} | expected=${expectedPoints} | pointsGained=0 | currentBalance=${newBalance}`
-                )
+                this.bot.logger.warn(this.bot.isMobile, 'URL-REWARD', `UrlReward completion unverified | ${message}`)
             }
+
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,

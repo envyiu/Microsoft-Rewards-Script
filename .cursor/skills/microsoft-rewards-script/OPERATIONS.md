@@ -2,6 +2,23 @@
 
 This is the operational companion to the architecture document. It explains how to run the project safely without exposing credentials or confusing generated state with source.
 
+## Standalone deployment: start here
+
+New Outlook/Hotmail imports default to a seven-day pre-Rewards phase. Dashboard account forms expose Auto/On/Off and show the deadline, daily query/service counts and authentication attention state. `newAccountMode` is accepted by account import/edit APIs and mapped to `ACCOUNT_N_NEW_ACCOUNT_MODE`. Old accounts are not automatically enrolled. Do not import enabled accounts until all destination workers advertise `preRewardsV1`. Do not test expiry by changing clocks or timestamps on real accounts; use synthetic test clocks. Normal runtime refuses enabled new accounts without an elapsed eligibility time in the worker-generated execution plan.
+
+For OTP, CAPTCHA or unsupported service initialization, use the guarded manual Desktop/Mobile window. It opens Bing and preserves the account's current identity/session. The guard remains active until that window is closed, even if the deadline passes while it is open. Initialization accepts supported Microsoft terms, creates one personal sample text file in OneDrive (`MSRW getting started.txt`) and one To Do task (`MSRW: Explore Microsoft To Do`), reads at most three Inbox messages, and views Calendar around today. It does not send mail, open message links/attachments, invite attendees, or enable subscriptions. Sample creation is remembered in durable `newAccount.artifacts`, while `serviceActions` resets daily; ambiguous UI remains pending rather than claiming completion. Mail bodies and subjects are never written to action logs. A rollback to an older worker requires pausing the affected new accounts first.
+
+New installations use separate Manager and Worker archives. Follow [Worker installation](../../../scripts/worker/README.md) and [Manager installation/migration](../../../../rewards-dashboard/manager/README.md). Source/cron examples below remain development or legacy instructions; do not run the old coordinator beside the new Manager/Worker system.
+
+- Dashboard: `127.0.0.1:8890`; Manager API: `127.0.0.1:3012`; worker API: `127.0.0.1:3010`. Manager and worker have separate tokens; dashboard uses Manager credentials server-side and optional dashboard login. Account/config writes target Manager, not the worker's denied management routes.
+- Local user services: `msrw-manager-api`, `msrw-dashboard`, optional `msrw-worker`. VPS uses system service `msrw-worker` under the normal worker user. Inspect active unit WorkingDirectory/EnvironmentFiles to discover actual state locations; an upgraded VPS may retain legacy paths.
+- Machine configuration is `manager.env` / `worker.env`; account authority and desired settings live in Manager's private control store. Worker snapshot, sessions, journal, Smart progress and diagnostics live beneath `MRS_WORKER_DATA`.
+- Desktop/Mobile/Android opens are account scoped. Wait only for the selected account's Running job. Other accounts, including the same proxy, keep running; do not stop a node or move its proxy group to make a manual open work.
+- Browser session/fingerprint/region are preserved during temporary handoff. Damru's account-bound native Android login is separate; stop the device to return ownership. Closing its viewer is insufficient.
+- Offline changes stay Pending until the worker acknowledges the desired revision. Workers continue accepted Smart schedules when Manager is offline. Never infer Running from stale logs or cached rosters, or fail over an offline account automatically.
+
+Before an actual upgrade, pause/drain the worker and close/return manual sessions. A binary/service restart is maintenance, unlike an ordinary manual open. Preserve current data privately and verify checkpoint markers before replacing code. Never restore old cookies over newer work as a shortcut rollback.
+
 ## 1. Prerequisites and first run
 
 Required:
@@ -28,13 +45,13 @@ The development entry point is `npm run dev` (equivalent to the TypeScript entry
 
 ## 2. Configuration precedence
 
-There are three different execution environments.
+Standalone Worker uses an explicit `MRS_CONFIG_FILE` and `MRS_SKIP_ENV_FILE=1`; both runtime and manual helper loaders honor these. The following source/Docker/API modes have different precedence and must not be confused with standalone paths.
 
 ### Local source/runtime
 
-`src/config/Load.ts` searches likely root/dist/src locations for configuration. A local `config.json` is normally copied from `config.example.json` and is ignored by git. Environment values win over `.env`; the loader also supports account values from the process environment.
+`src/util/Load.ts` searches likely root/dist/src locations for configuration. A local `config.json` is normally copied from `config.example.json` and is ignored by git. Environment values win over `.env`; the loader also supports account values from the process environment.
 
-The public template and runtime validator can have different defaults. For every behavior, inspect both `config.example.json` and `src/config/Validator.ts`; do not infer the effective value from one file alone.
+The public template and runtime validator can have different defaults. For every behavior, inspect both `config.example.json` and `src/util/Validator.ts`; do not infer the effective value from one file alone.
 
 ### Docker
 
@@ -45,6 +62,11 @@ The compose defaults use a timezone and cron schedule that can differ from local
 ### Control API
 
 The API can read and, when explicitly enabled/authenticated, write effective config and schedule files. API mutations are persistent state changes. Before using them, read the exact endpoint and opt-in rules in `scripts/api/README.md`.
+
+An enabled Smart Scheduler has no default run window (`windows: []`). Keep the API running to start the new day's
+eligible work at the next 30-second planning tick after midnight in each profile's timezone. Explicit windows,
+quiet hours and account/network locks still apply. This daily rollover also works when the API runs directly,
+without Docker or cron.
 
 ## 3. Account environment contract
 
@@ -135,6 +157,14 @@ Use the login state machine and its diagnostics rather than repeatedly deleting 
 
 Passwordless approval has a bounded wait and retry. TOTP is generated through OTPAuth when configured. Email/recovery code paths may require interactive input. A non-empty Microsoft error alert is a real failure; an empty postback alert may be a successful session transition and is handled specially by the login code.
 
+Rewards sign-in, Bing sign-in and mobile app authorization are separate checks. If a signed-in Rewards
+session receives a Flyout response without account data, dashboard loading verifies the existing Bing
+session once per account/platform/day in that bot process, checkpoints cookies and restores Rewards
+actions before reading Flyout again. A missing/invalid balance remains unavailable; it is never replaced
+with zero. This recovery needs an active browser and does not replace an explicitly supplied cookie jar.
+Checkpoint/Stop during login is an interruption, not an email/password failure; the handoff owns the exit
+result and normal failed-session logging must not overwrite it.
+
 If Rewards lands on `about:blank` during OAuth, check that the browser host-resolver workaround is present before changing redirect handling. If the account reaches a bot-warning profile, respect `contintueOnBotWarning`; continuing is an explicit risk choice and should remain visible in logs/config.
 
 ## 8. Sessions, diagnostics and cleanup
@@ -167,6 +197,14 @@ For query failures, check in this order:
 Do not replace the large local query asset with a tiny fixture in the working tree. Use a unit-test fixture or a mocked source instead.
 
 ## 10. Troubleshooting matrix
+
+### Idle manual account is waiting behind other jobs
+
+Inspect the selected account's fresh execution state and operation members, without exposing account secrets. A new manual operation should contain only that index with `scope: account`. A null network-group lock is intentional. Sibling proxy accounts are not blockers. Check both source and local worker support for membership-only snapshot activation; old code can wait on `scheduler.running.size` for the whole node. Do not work around this by stopping unrelated jobs. A real bot/config/profile change can still legitimately require drain.
+
+### Services exit cleanly without listening, or ignore configuration
+
+Check service status, socket listeners and sanitized journal diagnostics. Manager must resolve its `current` symlink when detecting the executable entrypoint. The systemd unit must load the actual absolute EnvironmentFile path; a successful unit-verification exit code alone does not rule out warnings. Do not print token files to diagnose this.
 
 ### Build fails after a clean install
 
@@ -203,3 +241,13 @@ Treat it as an account/platform risk, not a normal selector bug. Preserve the wa
 ## 11. Safe operational reporting
 
 An operational report should include timestamps, account index or redacted identity, platform, mode, exit state, point deltas, error titles and validation commands. It should not include passwords, tokens, raw cookies, full storage state, fingerprints, recovery codes, session DB content or unredacted config.
+
+## 12. Missing quest cards / Keep earning / streak
+
+Inspect `MORE-PROMOTIONS` card-status and `PUNCHCARD` quest-step reasons before retrying. `locked-prerequisite`, `waiting-day-or-search`, `requires-app` and `manual-claim` are deferred conditions, not successful completion or permission to force reports. A seven-day search task is satisfied by genuine daily search progress; normal worker schedules revisit quests on subsequent days. A positive HTTP acknowledgment or point balance alone does not prove a specific child complete. Missing parent/child/page data leaves the worker pending.
+
+Dashboard Daily streak is separate from protection and partner streaks. Zero means a confirmed zero; “chưa đọc được” means unknown; “dữ liệu cũ” means the last successful observation is unavailable/stale (24-hour display limit). New values arrive after the worker reads authenticated Rewards pages and the durable event is synchronized. Do not replace unknown with zero, clear sessions or toggle protection merely to refresh the displayed count. Store raw diagnostic payloads only in private directories with mode 0700/0600 and never attach them to Git or logs.
+
+### Manual browser reports Missing X server / $DISPLAY
+
+A systemd user worker can start before the graphical session and discover only a Wayland socket. Chromium must then launch with `--ozone-platform=wayland`; setting WAYLAND_DISPLAY alone does not select its backend. `scripts/main/browserDisplay.js` selects X11 when DISPLAY exists, otherwise Wayland when WAYLAND_DISPLAY exists. Test a headed browser with DISPLAY removed to reproduce this service environment. Do not change account cookies or clear sessions to repair a display failure.

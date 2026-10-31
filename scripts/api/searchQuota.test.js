@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
+import path from 'node:path'
 import test from 'node:test'
 
 const require = createRequire(import.meta.url)
-const ReactFunc = require('../../dist/browser/ReactFunc.js').default
-const BrowserFunc = require('../../dist/browser/BrowserFunc.js').default
-const { mapFlyoutToDashboard } = require('../../dist/browser/FlyoutDashboard.js')
-const { classifyRewardsPage, finiteNonNegative } = require('../../dist/browser/RewardsState.js')
-const { SearchProgress } = require('../../dist/functions/activities/search/SearchProgress.js')
-const { Search } = require('../../dist/functions/activities/search/BrowserSearch.js')
+const load = file => require(path.join(process.env.MRS_TEST_DIST || path.resolve('dist'), file))
+const ReactFunc = load('browser/ReactFunc.js').default
+const BrowserFunc = load('browser/BrowserFunc.js').default
+const { mapFlyoutToDashboard } = load('browser/FlyoutDashboard.js')
+const { classifyRewardsPage, finiteNonNegative } = load('browser/RewardsState.js')
+const { SearchProgress } = load('functions/activities/search/SearchProgress.js')
+const { Search } = load('functions/activities/search/BrowserSearch.js')
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} }
 const parser = new ReactFunc({ isMobile: true, logger })
@@ -193,11 +195,36 @@ test('bootstrap retries a slow Rewards DOM and dismisses the welcome dialog with
     assert.equal(bot.reactSnapshot.account.availablePoints, 0)
 })
 
+test('welcome dialog chooses Get started only inside the Rewards welcome dialog', async () => {
+    let clicked = 0
+    let closeSlotChecked = false
+    const button = { first: () => button, isVisible: async () => true, click: async () => { clicked++ } }
+    const dialog = {
+        filter: ({ hasText }) => { assert.ok(hasText.test('Welcome to Microsoft Rewards')); return dialog },
+        first: () => dialog,
+        isVisible: async () => true,
+        getByRole: (role, options) => {
+            assert.equal(role, 'button')
+            assert.ok(options.name.test('Get started'))
+            assert.equal(options.name.test('Redeem now'), false)
+            return button
+        }
+    }
+    const page = {
+        getByRole: role => { assert.equal(role, 'dialog'); return dialog },
+        waitForSelector: async () => { closeSlotChecked = true; return null }
+    }
+    await new BrowserFunc({ isMobile: false, logger }).dismissRewardsWelcomeDialog(page)
+    assert.equal(clicked, 1)
+    assert.equal(closeSlotChecked, false)
+})
+
 test('dashboard enrichment and search progress use the real platform-specific quotas', async () => {
     const html = earnPage({ pc: { max: 90, progress: 30 }, mobile: { max: 60, progress: 15 } })
+    const events = []
     const bot = {
         isMobile: true,
-        logger,
+        logger: { ...logger, info: (_platform, title, message) => events.push({ title, message }) },
         cookies: { mobile: [], desktop: [] },
         browser: { react: parser },
         http: { request: async () => ({ data: html, headers: {} }) }
@@ -209,6 +236,10 @@ test('dashboard enrichment and search progress use the real platform-specific qu
     const progress = new SearchProgress({ browser: { func: { getDashboardData: async () => dashboard } } })
     assert.equal((await progress.getMissing(false)).totalPoints, 60)
     assert.equal((await progress.getMissing(true)).totalPoints, 45)
+    const snapshot = JSON.parse(events.find(e => e.title === 'SMART-QUOTA').message)
+    assert.deepEqual(snapshot.desktop, { max: 90, progress: 30 })
+    assert.deepEqual(snapshot.mobile, { max: 60, progress: 15 })
+    assert.ok(Number.isFinite(Date.parse(snapshot.readAt)))
 })
 
 test('search progress distinguishes confirmed zero quota from unavailable counters', async () => {

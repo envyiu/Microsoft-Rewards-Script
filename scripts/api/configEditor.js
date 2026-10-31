@@ -3,6 +3,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 function resolveConfigPath(projectRoot) {
+    if (process.env.MRS_CONFIG_FILE) return path.resolve(process.env.MRS_CONFIG_FILE)
     const candidates = [
         path.join(projectRoot, 'config.json'),
         path.join(projectRoot, 'dist', 'config.json'),

@@ -1,3 +1,8 @@
+> **Triển khai Manager/Worker mới:** xem [hướng dẫn Worker](scripts/worker/README.md).
+> Worker dùng Smart Scheduler và được quản lý qua Manager trong repo `rewards-dashboard`.
+> Các hướng dẫn cron/Control API bên dưới dành cho chế độ CLI/coordinator cũ.
+> Hợp đồng kỹ thuật của bộ cài mới: [Manager/Worker](../rewards-dashboard/manager/ARCHITECTURE.md).
+
 [![Discord](https://img.shields.io/badge/Join%20Our%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/8BxYbV4pkj)
 [![Latest Build](https://img.shields.io/github/actions/workflow/status/TheNetsky/Microsoft-Rewards-Script/auto-release.yml?branch=v4&style=for-the-badge&label=Latest%20Build)](https://github.com/TheNetsky/Microsoft-Rewards-Script/actions/workflows/auto-release.yml)
 [![Docker](https://img.shields.io/badge/Docker-GHCR-blue?style=for-the-badge&logo=docker)](https://github.com/TheNetsky/Microsoft-Rewards-Script/pkgs/container/microsoft-rewards-script)
@@ -70,7 +75,7 @@ ACCOUNT_1_EMAIL=email@example.com
 >
 > Add one `ACCOUNT_N_*` block per account. Account slots do not need to be contiguous: `ACCOUNT_2` or `ACCOUNT_4` can be configured even when earlier slots are missing. Accounts run in ascending slot order. Optional per-account fields cover recovery email, locale, language, proxy, and fingerprint persistence - see [`env.example`](env.example) for all of them.
 
-`ACCOUNT_N_LANG_CODE` accepts a BCP 47 language tag such as `nl`, `it`, or `pt-BR`. `ACCOUNT_N_GEO_LOCALE` accepts a two-letter country code or defaults to `auto`. The selected language and country are applied consistently to browser fingerprints, `Accept-Language`, Microsoft Rewards app headers, and market-specific requests. In `auto` mode, the country reported by the Microsoft profile is cached after the first successful dashboard request; changing either locale setting automatically replaces an incompatible saved fingerprint.
+`ACCOUNT_N_LANG_CODE` accepts a BCP 47 language tag such as `nl`, `it`, or `pt-BR`. `ACCOUNT_N_GEO_LOCALE` accepts a two-letter country code or defaults to `auto`. The selected language and country are applied consistently to the Chromium locale, `Accept-Language`, Microsoft Rewards app headers, and market-specific requests. Desktop identity is read from the running Chromium instance. Mobile identity uses a sourced Patchright phone descriptor and keeps that profile stable when fingerprint persistence is enabled. In `auto` mode, the country reported by the Microsoft profile is cached after the first successful dashboard request; changing either locale setting replaces an incompatible saved mobile identity.
 
 > [!TIP]
 > For 2FA accounts, set `ACCOUNT_N_TOTP_SECRET` and the script will generate and enter the 6-digit code automatically. To get the secret: in your Microsoft Security settings open 'Manage how you sign in', add an Authenticator app, and when the QR code appears choose 'enter code manually' - use that code as the value in your `.env`.
@@ -189,7 +194,7 @@ Edit `config.json` to customize behavior, or set `CONFIG_*` environment variable
 | Setting                     | Type    | Default      | Description                                                        | Docker environment variable           |
 | --------------------------- | ------- | ------------ | ------------------------------------------------------------------ | ------------------------------------- |
 | `sessionPath`               | string  | `"sessions"` | Directory to store browser sessions                                |                                       |
-| `headless`                  | boolean | `false`      | Run browser invisibly                                              | Always `true` in Docker               |
+| `headless`                  | boolean | `false`      | `true` runs invisibly; `false` opens a browser window and requires a display | Always `true` in Docker        |
 | `clusters`                  | number  | `1`          | Number of concurrent account clusters                              | `CONFIG_CLUSTERS`                     |
 | `errorDiagnostics`          | boolean | `false`      | Save error and unknown-login page diagnostics under `diagnostics/` | `CONFIG_ERROR_DIAGNOSTICS`            |
 | `ensureStreakProtection`    | boolean | `true`       | Ensure streak protection is enabled                                | `CONFIG_ENSURE_STREAK_PROTECTION`     |
@@ -355,9 +360,21 @@ Regardless of the experimental search settings, normal Rewards actions use the c
 
 Leave `proxy.ignoreCertificateErrors` disabled for normal HTTP(S)/SOCKS proxies. Enabling it weakens TLS protection for the entire browser context and should only be used when a trusted intercepting proxy cannot otherwise present a valid certificate.
 
-`proxy.queryEngine` controls whether query-source HTTP requests use the account HTTP proxy. Set the corresponding `ACCOUNT_N_PROXY_HTTP=true` (and configure `ACCOUNT_N_PROXY_*`) for those HTTP requests to have a proxy available; browser traffic uses `ACCOUNT_N_PROXY_URL` independently.
+`proxy.queryEngine` controls whether query-source HTTP requests use the account proxy. Set the corresponding `ACCOUNT_N_PROXY_HTTP=true` (and configure `ACCOUNT_N_PROXY_*`) for those HTTP requests to use a proxy; browser traffic uses `ACCOUNT_N_PROXY_URL` independently.
 
-Account browser proxies support `http://`, `https://`, `socks4://`, and `socks5://` (a bare hostname is treated as HTTP). HTTP(S) proxies may use `ACCOUNT_N_PROXY_USERNAME` and `ACCOUNT_N_PROXY_PASSWORD`; Patchright does not support browser authentication for SOCKS4/SOCKS5 proxies. Invalid protocols, ports, partial credentials, and authenticated SOCKS proxy configurations are rejected during account validation before the browser starts.
+Account proxies support `http://`, `https://`, `socks4://`, and `socks5://` (a bare hostname is treated as HTTP). HTTP(S) proxies support username/password credentials. Authenticated SOCKS5 is also supported: the browser and proxied HTTP clients use a temporary local relay to connect to the upstream SOCKS5 proxy. SOCKS4 authentication, inline URL credentials, invalid ports, and partial username/password pairs are rejected during account validation.
+
+Configure SOCKS5 credentials in separate account fields:
+
+```dotenv
+ACCOUNT_1_PROXY_URL=socks5://proxy.example.com
+ACCOUNT_1_PROXY_PORT=1080
+ACCOUNT_1_PROXY_USERNAME=proxy-user
+ACCOUNT_1_PROXY_PASSWORD=proxy-password
+ACCOUNT_1_PROXY_HTTP=true
+```
+
+Browser traffic uses the configured account proxy automatically. HTTP client traffic follows the existing `ACCOUNT_N_PROXY_HTTP` and `proxy.queryEngine` settings.
 
 ### Webhooks
 
@@ -418,11 +435,10 @@ npm run manual-login -- --email user@example.com --fresh
 ```
 
 The email must match an `ACCOUNT_N_EMAIL` entry in `.env`. Existing cookies are restored by default, while `--fresh`
-starts without them but retains a compatible saved fingerprint when fingerprint persistence is enabled. The command
-uses the selected account's language, region, proxy, proxy credentials, and fingerprint settings from `.env`. For
-consistent device identity between the manual and automated browser, enable `ACCOUNT_N_SAVE_FINGERPRINT_MOBILE=true`
-and/or
-`ACCOUNT_N_SAVE_FINGERPRINT_DESKTOP=true` for the platforms you use.
+starts without them but retains a compatible saved mobile profile when fingerprint persistence is enabled. The command
+uses the selected account's language, region, proxy, proxy credentials, and identity settings from `.env`. Enable
+`ACCOUNT_N_SAVE_FINGERPRINT_MOBILE=true` to keep the same sourced mobile profile between manual and automated runs.
+Desktop runs always use the identity reported by the current Chromium binary and host.
 
 The session path, global timeout, media-blocking option, and proxy TLS option come from `config.json`. The corresponding
 `CONFIG_GLOBAL_TIMEOUT`, `CONFIG_EXPERIMENTAL_BLOCK_MEDIA`, and

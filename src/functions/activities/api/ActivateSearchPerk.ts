@@ -1,3 +1,4 @@
+import { waitForActivity } from '../../../util/ActivityTiming'
 import type { Dashboard, DashboardData } from '../../../interface/DashboardData'
 import { BaseActivity } from '../BaseActivity'
 
@@ -59,6 +60,7 @@ export class ActivateSearchPerk extends BaseActivity {
 
         const live = await this.bot.browser.func.ensureOffer(perk.offerId)
         if (!live) {
+            this.bot.logger.markWorkerFailure()
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'ACTIVATE-SEARCH-PERK',
@@ -120,6 +122,7 @@ export class ActivateSearchPerk extends BaseActivity {
                     'green'
                 )
             } else {
+                this.bot.logger.markWorkerFailure()
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'ACTIVATE-SEARCH-PERK',
@@ -127,7 +130,7 @@ export class ActivateSearchPerk extends BaseActivity {
                 )
             }
 
-            await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 10000))
+            await waitForActivity(this.bot, this.bot.utils.randomDelay(5000, 10000))
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,

@@ -1,5 +1,7 @@
 import { Impit } from 'impit'
 import type { HttpMethod, ImpitResponse, RequestInit as ImpitRequestInit } from 'impit'
+import { createProxyRelay } from '../../common/proxyRelay.cjs'
+import type { ProxyRelay } from '../../common/proxyRelay.cjs'
 import type { AccountProxy } from '../interface/Account'
 import { parseBrowserProxyUrl } from './Proxy'
 
@@ -168,18 +170,17 @@ async function send<T>(
 }
 
 class HttpClient {
-    private instance: Impit
+    private instance?: Impit
     private direct?: Impit
     private account: AccountProxy
     private defaultHeaders: Record<string, unknown>
+    private instancePromise?: Promise<Impit>
+    private relayPromise?: Promise<ProxyRelay | null>
+    private closed = false
 
     constructor(account: AccountProxy, defaultHeaders: Record<string, unknown> = {}) {
         this.account = account
         this.defaultHeaders = { ...defaultHeaders }
-
-        const proxyUrl = this.account.url && this.account.proxyHttp ? this.buildProxyUrl(this.account) : undefined
-
-        this.instance = new Impit({ browser: 'chrome', proxyUrl, timeout: DEFAULT_TIMEOUT })
     }
 
     public setDefaultHeaders(headers: Record<string, unknown>): void {
@@ -198,14 +199,50 @@ class HttpClient {
             return send<T>(this.direct, url, init, requestConfig)
         }
 
-        return send<T>(this.instance, url, init, requestConfig)
+        return send<T>(await this.getInstance(), url, init, requestConfig)
     }
 
-    private buildProxyUrl(proxyConfig: AccountProxy): string {
+    public async close(): Promise<void> {
+        this.closed = true
+        const relayPromise = this.relayPromise
+        this.relayPromise = undefined
+        if (!relayPromise) return
+
+        const relay = await relayPromise.catch(() => null)
+        await relay?.close()
+    }
+
+    private async getInstance(): Promise<Impit> {
+        if (this.closed) throw new Error('HTTP client is closed')
+        if (this.instance) return this.instance
+
+        const instancePromise = (this.instancePromise ??= this.createInstance())
+        try {
+            this.instance = await instancePromise
+            return this.instance
+        } catch (error) {
+            if (this.instancePromise === instancePromise) this.instancePromise = undefined
+            throw error
+        }
+    }
+
+    private async createInstance(): Promise<Impit> {
+        const proxyUrl = this.account.url && this.account.proxyHttp ? await this.buildProxyUrl(this.account) : undefined
+        return new Impit({ browser: 'chrome', proxyUrl, timeout: DEFAULT_TIMEOUT })
+    }
+
+    private async buildProxyUrl(proxyConfig: AccountProxy): Promise<string> {
         const { url: baseUrl, port, username, password } = proxyConfig
 
         const urlObj = parseBrowserProxyUrl(baseUrl)
         const protocol = urlObj.protocol.toLowerCase()
+
+        if (protocol === 'socks5:' && username && password) {
+            const relayPromise = (this.relayPromise ??= createProxyRelay(proxyConfig))
+            const relay = await relayPromise
+            if (!relay) throw new Error('Could not start the local relay for the authenticated SOCKS5 proxy')
+            return relay.url
+        }
 
         if (username && password) {
             urlObj.username = encodeURIComponent(username)

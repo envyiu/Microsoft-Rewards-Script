@@ -1,3 +1,4 @@
+import { waitForActivity, waitForSearch } from '../../../util/ActivityTiming'
 import type { Page } from 'patchright'
 import { BaseActivity } from '../BaseActivity'
 import { activateSearchOnBing, findSearchOnBingOffer, getSearchOnBingQueries } from './SearchOnBingShared'
@@ -83,7 +84,7 @@ export class SearchOnBing extends BaseActivity {
                 await this.bot.browser.func.synchronizeActiveBrowserCookies('SEARCH-ON-BING-COOKIE-SEED', true)
                 await this.typeSearch(page, query)
 
-                await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 7000))
+                await waitForSearch(this.bot, this.bot.utils.randomDelay(5000, 7000))
 
                 await this.bot.browser.func.synchronizeActiveBrowserCookies('SEARCH-ON-BING-COOKIE-CAPTURE')
                 const dashboard = (await this.bot.browser.func.getDashboardData()).dashboard
@@ -133,7 +134,7 @@ export class SearchOnBing extends BaseActivity {
                 )
             } finally {
                 if (!this.success && index < queries.length - 1) {
-                    await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 15000))
+                    await waitForActivity(this.bot, this.bot.utils.randomDelay(5000, 15000))
                 }
             }
         }
@@ -161,12 +162,22 @@ export class SearchOnBing extends BaseActivity {
         const searchBox = page.locator(selector)
         await searchBox.waitFor({ state: 'visible', timeout: 15000 })
 
-        await this.bot.utils.wait(500)
+        await waitForActivity(this.bot, 500)
         await this.bot.browser.utils.ghostClick(page, selector, { clickCount: 3 })
         await searchBox.fill('')
 
-        await page.keyboard.type(query, { delay: this.bot.utils.randomDelay(45, 90) })
-        await page.keyboard.press('Enter')
+        if (this.bot.executionPlan?.urgent) await page.locator('#sb_form_q').fill(query)
+        else await page.keyboard.type(query, { delay: this.bot.utils.randomDelay(45, 90) })
+        const ready = this.bot.executionPlan?.urgent
+            ? page.waitForURL(url => url.searchParams.get('q') === query, {
+                  waitUntil: 'domcontentloaded',
+                  timeout: 15000
+              })
+            : null
+        if (ready) {
+            await Promise.all([ready, page.keyboard.press('Enter')])
+            await page.locator('#b_results').waitFor({ state: 'visible', timeout: 15000 })
+        } else await page.keyboard.press('Enter')
         await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {})
     }
 }

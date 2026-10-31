@@ -6,8 +6,17 @@ node_modules/
 /config/smart-schedule.json
 /.vscode
 /diagnostics
+/run/damru/
 note
 .DS_Store
 .playwright-chromium-installed
 .stfolder/
 .env
+config/hybrid/
+
+# Independent release output
+/releases/
+/packages/contracts/dist/
+
+# Private local configuration backups
+/config.json.bak

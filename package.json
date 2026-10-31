@@ -20,15 +20,31 @@
         "lint": "eslint .",
         "lint:fix": "eslint . --fix",
         "test:log-parser": "node --test scripts/api/logParser.test.js",
+        "test:new-account": "node --test scripts/api/newAccount.test.js scripts/api/preRewardsGuard.test.js scripts/api/rewardsOnboarding.test.js scripts/api/newAccountServices.test.js",
         "test:search-quota": "node --test scripts/api/searchQuota.test.js",
+        "test:rewards-activities": "node --test scripts/api/rewardsActivities.test.js scripts/api/morePromotions.test.js scripts/api/activityVerification.test.js scripts/api/upstreamRewards.test.js",
+        "test:urgent-api": "node --test scripts/api/urgentApi.test.js",
+        "test:urgent-execution": "node --test scripts/api/urgentExecution.test.js",
         "test:smart-scheduler": "node --test scripts/api/smartScheduler.test.js",
+        "test:hybrid": "node --test scripts/api/hybrid.test.js scripts/api/hybridApi.test.js scripts/api/botCheckpoint.test.js",
         "test:account-store": "node --test scripts/api/accountStore.test.js",
+        "test:account-ip": "node --test scripts/api/accountIpChecker.test.js",
+        "test:proxy": "node --test scripts/api/proxyRelay.test.js scripts/api/proxyValidation.test.js scripts/api/accountStore.test.js",
+        "test:manual-session": "node --test scripts/api/manualSessionManager.test.js scripts/api/manualSessionClose.test.js",
+        "test:browser-lifecycle": "node --test scripts/api/browserLifecycle.test.js",
+        "test:browser-session": "node --test scripts/main/browserDisplay.test.js scripts/main/browserIdentity.test.js scripts/main/browserSessionPersistence.test.js scripts/main/browserSessionState.test.js scripts/main/browserSessionCheckpoint.test.js",
+        "smoke:browser-identity": "node scripts/main/browserIdentitySmoke.js",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "clear-diagnostics": "rimraf diagnostics",
         "clear-sessions": "node ./scripts/main/clearSessions.js",
         "manual-login": "node ./scripts/main/manualLogin.js",
-        "open-session": "node ./scripts/main/browserSession.js -email"
+        "open-session": "node ./scripts/main/browserSession.js -email",
+        "test:fleet": "node --test scripts/api/fleet.test.js scripts/api/nodeProvisioner.test.js",
+        "worker": "node --env-file-if-exists=worker.env scripts/worker/server.js",
+        "build:contracts": "node scripts/release/contracts.js",
+        "release:worker": "node scripts/release/worker.js",
+        "test:worker": "node --test scripts/worker/*.test.js"
     },
     "keywords": [
         "Bing Rewards",
@@ -54,16 +70,15 @@
     "dependencies": {
         "chalk": "^4.1.2",
         "fast-xml-parser": "^5.9.3",
-        "fingerprint-generator": "^2.1.88",
-        "fingerprint-injector": "^2.1.88",
         "ghost-cursor-playwright-port": "^1.4.3",
         "impit": "^0.14.2",
         "ms": "^2.1.3",
         "otpauth": "^9.5.1",
         "p-queue": "^9.3.0",
         "patchright": "^1.61.1",
+        "proxy-chain": "^2.7.1",
         "semver": "^7.8.1",
         "ts-node": "^10.9.2",
-        "zod": "^4.4.3"
+        "zod": "4.6.7"
     }
 }

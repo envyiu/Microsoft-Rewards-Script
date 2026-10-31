@@ -1,5 +1,4 @@
-import { randomBytes } from 'crypto'
-import type { Page } from 'patchright'
+import type { BrowserContext, Page } from 'patchright'
 
 import { URLs } from '../../../constants/urls'
 import type { MicrosoftRewardsBot } from '../../../index'
@@ -31,6 +30,8 @@ interface ParsedReport {
 }
 
 export class VisualSearchBrowser {
+    private acquisitionContext: BrowserContext | null = null
+
     constructor(private readonly bot: MicrosoftRewardsBot) {}
 
     public async report(candidate: VisualSearchCandidate): Promise<VisualSearchReport> {
@@ -46,7 +47,7 @@ export class VisualSearchBrowser {
 
         let visualPage: Page | null = null
         try {
-            visualPage = await sourcePage.context().newPage()
+            visualPage = await this.bot.newBrowserPage(sourcePage.context())
             const responsePromise = visualPage
                 .waitForResponse(
                     response => {
@@ -126,50 +127,58 @@ export class VisualSearchBrowser {
             delete headers['Cookie']
             delete headers['cookie']
 
-            const encodedSeed = encodeURIComponent(seed)
-            const url =
-                `${URLs.bing.origin}/images/kblob` +
-                `?iss=sbi&form=SBIHMP&sbisrc=UrlPaste&vsimg=${encodedSeed}&imgurl=${encodedSeed}`
-            const boundary = `----WebKitFormBoundary${randomBytes(8).toString('hex')}`
-            const response = await page.request.post(url, {
-                headers: {
-                    ...headers,
-                    Accept: 'application/json',
-                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                    Referer: `${URLs.bing.origin}/visualsearch`,
-                    Origin: URLs.bing.origin,
-                    'Sec-Fetch-Dest': 'empty',
-                    'Sec-Fetch-Mode': 'cors',
-                    'Sec-Fetch-Site': 'same-origin'
-                },
-                data: this.buildMultipart(boundary),
-                timeout: 20000
-            })
-
-            const responseData = await response.text()
-            const redirectUrl = this.parseRedirect(responseData)
-            if (!redirectUrl) {
+            const acquisitionContext = await this.getAcquisitionContext(page)
+            if (!acquisitionContext) {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'VISUAL-SEARCH-BCID',
-                    `kblob returned no redirectUrl | status=${response.status()} - endpoint shape may have changed`
+                    'Browser is unavailable - cannot create an isolated visual-search context'
+                )
+                return null
+            }
+
+            // Match Bing's current public "paste image URL" flow. The former
+            // /images/kblob transport now rejects this request shape with 400.
+            const url = new URL('/images/search', URLs.bing.origin)
+            url.search = new URLSearchParams({
+                view: 'detailv2',
+                iss: 'sbi',
+                form: 'SBIVSP',
+                sbisrc: 'UrlPaste',
+                q: `imgurl:${seed}`,
+                idpbck: '1',
+                vsimg: seed
+            }).toString()
+
+            const response = await acquisitionContext.request.get(url.toString(), {
+                headers: {
+                    ...headers,
+                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    Referer: `${URLs.bing.origin}/visualsearch`,
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'same-origin'
+                },
+                timeout: 20000
+            })
+
+            const resultUrl = new URL(response.url())
+            const bcid = resultUrl.searchParams.get('bcid')
+            if (!bcid) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'VISUAL-SEARCH-BCID',
+                    `Bing visual search returned no bcid | status=${response.status()} | path=${resultUrl.pathname}`
                 )
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'VISUAL-SEARCH-BCID',
-                    `kblob response: ${responseData.slice(0, 400)}`
+                    `Visual-search result URL: ${resultUrl.toString().slice(0, 500)}`
                 )
                 return null
             }
 
-            const redirect = new URL(redirectUrl, URLs.bing.origin)
-            const bcid = redirect.searchParams.get('bcid')
-            if (!bcid) {
-                this.bot.logger.warn(this.bot.isMobile, 'VISUAL-SEARCH-BCID', `Redirect had no bcid | ${redirectUrl}`)
-                return null
-            }
-
-            const query = redirect.searchParams.get('q') ?? ''
+            const query = resultUrl.searchParams.get('q') ?? ''
             this.bot.logger.info(
                 this.bot.isMobile,
                 'VISUAL-SEARCH-BCID',
@@ -177,7 +186,7 @@ export class VisualSearchBrowser {
                     ` | seed=${seed.slice(0, 80)}`,
                 'green'
             )
-            return { bcid, query, serpUrl: redirect.toString() }
+            return { bcid, query, serpUrl: resultUrl.toString() }
         } catch (error) {
             this.bot.logger.warn(
                 this.bot.isMobile,
@@ -186,6 +195,36 @@ export class VisualSearchBrowser {
             )
             return null
         }
+    }
+
+    private async getAcquisitionContext(sourcePage: Page): Promise<BrowserContext | null> {
+        if (this.acquisitionContext) return this.acquisitionContext
+
+        const browser = sourcePage.context().browser()
+        if (!browser) return null
+
+        // An authenticated Bing cookie jar redirects this URL to /images and
+        // strips bcid. Keep acquisition anonymous, then report the resulting
+        // bcid from the authenticated browser context in report().
+        const context = await browser.newContext({
+            userAgent: this.bot.fingerprint.fingerprint.navigator.userAgent,
+            locale: this.bot.accountLocale.locale,
+            extraHTTPHeaders: {
+                'Accept-Language': this.bot.accountLocale.acceptLanguage
+            },
+            ignoreHTTPSErrors: this.bot.config.proxy.ignoreCertificateErrors
+        })
+        this.acquisitionContext = context
+        context.once('close', () => {
+            if (this.acquisitionContext === context) this.acquisitionContext = null
+        })
+
+        this.bot.logger.debug(
+            this.bot.isMobile,
+            'VISUAL-SEARCH-BCID',
+            'Created an isolated cookie-free context for visual-search acquisition'
+        )
+        return context
     }
 
     public async getSeedUrls(): Promise<string[]> {
@@ -242,34 +281,6 @@ export class VisualSearchBrowser {
         }
 
         return [STATIC_SEED_URL]
-    }
-
-    private buildMultipart(boundary: string): Buffer {
-        const fields = [
-            { name: 'cbir', value: 'sbi' },
-            { name: 'imageBin', value: '' },
-            { name: 'imgurl', value: '' }
-        ]
-        const parts = fields.map(field =>
-            Buffer.from(
-                `--${boundary}\r\nContent-Disposition: form-data; name="${field.name}"\r\n\r\n${field.value}\r\n`,
-                'utf8'
-            )
-        )
-        parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'))
-        return Buffer.concat(parts)
-    }
-
-    private parseRedirect(data: unknown): string | null {
-        try {
-            const parsed = typeof data === 'string' ? JSON.parse(data) : data
-            const url = (parsed as { redirectUrl?: unknown })?.redirectUrl
-            if (typeof url === 'string' && url.includes('bcid=')) return url
-        } catch {}
-
-        if (typeof data !== 'string') return null
-        const raw = data.match(/"redirectUrl"\s*:\s*"([^"]+)"/)?.[1]
-        return raw?.includes('bcid=') ? raw.replace(/\\u002f/gi, '/').replace(/\\\//g, '/') : null
     }
 
     private parseReport(data: unknown): ParsedReport {

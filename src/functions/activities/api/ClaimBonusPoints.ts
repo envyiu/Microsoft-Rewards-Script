@@ -1,3 +1,4 @@
+import { waitForActivity } from '../../../util/ActivityTiming'
 import { BaseActivity } from '../BaseActivity'
 
 export class ClaimBonusPoints extends BaseActivity {
@@ -25,6 +26,7 @@ export class ClaimBonusPoints extends BaseActivity {
 
             const newBalance = await this.bot.browser.func.getCurrentPoints()
             if (newBalance === null) {
+                this.bot.logger.markWorkerFailure()
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'CLAIM-BONUS-POINTS',
@@ -60,7 +62,7 @@ export class ClaimBonusPoints extends BaseActivity {
                 )
             }
 
-            await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 10000))
+            await waitForActivity(this.bot, this.bot.utils.randomDelay(5000, 10000))
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,

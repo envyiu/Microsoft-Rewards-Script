@@ -23,6 +23,8 @@ import { ApiSearch } from './activities/experimental/ApiSearch'
 import { ApiSearchOnBing } from './activities/experimental/ApiSearchOnBing'
 import { EdgeBrowsing } from './activities/experimental/EdgeBrowsing'
 
+import type { SmartWorker } from '../interface/ExecutionPlan'
+
 import type { Page } from 'patchright'
 import type { BasePromotion, DashboardData } from '../interface/DashboardData'
 import type { AppDashboardData, Promotion } from '../interface/AppDashBoardData'
@@ -35,6 +37,45 @@ export default class Activities {
         this.bot = bot
     }
 
+    private workerErrors = new Set<SmartWorker>()
+    private workerDashboard: DashboardData | undefined
+
+    resetWorkerTracking(): void {
+        this.workerErrors.clear()
+        this.workerDashboard = undefined
+    }
+
+    private async trackWorker<T>(
+        worker: SmartWorker,
+        action: () => Promise<T>,
+        data?: DashboardData,
+        final = true
+    ): Promise<T> {
+        if (this.bot.executionPlan?.type !== 'workers') return action()
+        if (data) this.workerDashboard = data
+        const before = this.bot.logger.workerFailureCount
+        try {
+            const result = await action()
+            if (this.bot.logger.workerFailureCount > before) this.workerErrors.add(worker)
+            if (final) {
+                if (this.workerErrors.has(worker))
+                    this.bot.logger.warn('main', 'SMART-WORKER-PENDING', `worker=${worker} | reason=activity-error`)
+                else
+                    this.bot.markCompletedSmartWorkers(
+                        true,
+                        this.workerDashboard,
+                        this.bot.logger.workerFailureCount,
+                        worker
+                    )
+            }
+            return result
+        } catch (error) {
+            this.workerErrors.add(worker)
+            this.bot.logger.warn('main', 'SMART-WORKER-PENDING', `worker=${worker} | reason=activity-error`)
+            throw error
+        }
+    }
+
     doSearch = async (page: Page, isMobile: boolean, budget?: number): Promise<number> => {
         if (this.bot.config.experimental.apiSearch) {
             return await new ApiSearch(this.bot).doSearch(isMobile, budget)
@@ -43,10 +84,16 @@ export default class Activities {
     }
 
     doBonusSearches = async (page: Page): Promise<number> => {
-        if (this.bot.config.experimental.apiSearch) {
-            return await new ApiSearch(this.bot).doBonusSearches()
-        }
-        return await new BrowserSearch(this.bot).doBonusSearches(page)
+        return this.trackWorker(
+            'bonusSearches',
+            async () => {
+                if (this.bot.config.experimental.apiSearch) {
+                    return await new ApiSearch(this.bot).doBonusSearches()
+                }
+                return await new BrowserSearch(this.bot).doBonusSearches(page)
+            },
+            undefined
+        )
     }
 
     doSearchOnBing = async (promotion: BasePromotion, page: Page): Promise<void> => {
@@ -58,19 +105,44 @@ export default class Activities {
     }
 
     doDailySet = async (data: DashboardData): Promise<void> => {
-        await new DailySet(this.bot).run(data)
+        return this.trackWorker(
+            'dailySet',
+            async () => {
+                await new DailySet(this.bot).run(data)
+            },
+            data
+        )
     }
 
     doMorePromotions = async (data: DashboardData): Promise<void> => {
-        await new MorePromotions(this.bot).run(data)
+        return this.trackWorker(
+            'morePromotions',
+            async () => {
+                await new MorePromotions(this.bot).run(data)
+            },
+            data
+        )
     }
 
     doPunchCardsMobile = async (data: DashboardData): Promise<void> => {
-        await new PunchCards(this.bot).runMobile(data)
+        return this.trackWorker(
+            'punchCards',
+            async () => {
+                await new PunchCards(this.bot).runMobile(data)
+            },
+            data,
+            false
+        )
     }
 
     doPunchCardsDesktop = async (): Promise<void> => {
-        await new PunchCards(this.bot).runDesktop()
+        return this.trackWorker(
+            'punchCards',
+            async () => {
+                await new PunchCards(this.bot).runDesktop()
+            },
+            undefined
+        )
     }
 
     doUrlReward = async (promotion: BasePromotion): Promise<void> => {
@@ -79,13 +151,25 @@ export default class Activities {
     }
 
     doClaimBonusPoints = async (): Promise<void> => {
-        const claimBonusPoints = new ClaimBonusPoints(this.bot)
-        await claimBonusPoints.claimBonusPoints()
+        return this.trackWorker(
+            'claimBonusPoints',
+            async () => {
+                const claimBonusPoints = new ClaimBonusPoints(this.bot)
+                await claimBonusPoints.claimBonusPoints()
+            },
+            undefined
+        )
     }
 
     doEnsureStreakProtection = async (): Promise<void> => {
-        const ensureStreakProtection = new EnsureStreakProtection(this.bot)
-        await ensureStreakProtection.ensureStreakProtection()
+        return this.trackWorker(
+            'streakProtection',
+            async () => {
+                const ensureStreakProtection = new EnsureStreakProtection(this.bot)
+                await ensureStreakProtection.ensureStreakProtection()
+            },
+            undefined
+        )
     }
 
     doClaimReward = async (child: QuestChild, parentId: string): Promise<void> => {
@@ -94,13 +178,25 @@ export default class Activities {
     }
 
     doActivateSearchPerk = async (data: DashboardData): Promise<void> => {
-        const activateSearchPerk = new ActivateSearchPerk(this.bot)
-        await activateSearchPerk.activate(data)
+        return this.trackWorker(
+            'activateSearchPerk',
+            async () => {
+                const activateSearchPerk = new ActivateSearchPerk(this.bot)
+                await activateSearchPerk.activate(data)
+            },
+            data
+        )
     }
 
     doVisualSearch = async (data: DashboardData): Promise<number> => {
-        const visualSearch = new VisualSearch(this.bot)
-        return await visualSearch.doVisualSearch(data)
+        return this.trackWorker(
+            'visualSearch',
+            async () => {
+                const visualSearch = new VisualSearch(this.bot)
+                return await visualSearch.doVisualSearch(data)
+            },
+            data
+        )
     }
 
     doAppReward = async (promotion: Promotion): Promise<void> => {
@@ -109,17 +205,35 @@ export default class Activities {
     }
 
     doReadToEarn = async (): Promise<void> => {
-        const readToEarn = new ReadToEarn(this.bot)
-        await readToEarn.doReadToEarn()
+        return this.trackWorker(
+            'readToEarn',
+            async () => {
+                const readToEarn = new ReadToEarn(this.bot)
+                await readToEarn.doReadToEarn()
+            },
+            undefined
+        )
     }
 
     doDailyCheckIn = async (): Promise<void> => {
-        const dailyCheckIn = new DailyCheckIn(this.bot)
-        await dailyCheckIn.doDailyCheckIn()
+        return this.trackWorker(
+            'dailyCheckIn',
+            async () => {
+                const dailyCheckIn = new DailyCheckIn(this.bot)
+                await dailyCheckIn.doDailyCheckIn()
+            },
+            undefined
+        )
     }
 
     doAppPromotions = async (data: AppDashboardData): Promise<void> => {
-        await new AppPromotions(this.bot).run(data)
+        return this.trackWorker(
+            'appPromotions',
+            async () => {
+                await new AppPromotions(this.bot).run(data)
+            },
+            undefined
+        )
     }
 
     doEdgeBrowsing = async (data: DashboardData, signal?: AbortSignal): Promise<void> => {

@@ -1,3 +1,4 @@
+import { waitForActivity, waitForSearch } from '../../../util/ActivityTiming'
 import type { Page } from 'patchright'
 
 import { URLs } from '../../../constants/urls'
@@ -27,6 +28,14 @@ interface SessionStats {
 
 export class Search extends BaseActivity {
     private searchCount = 0
+
+    public async doUncountedQuery(page: Page, query: string, isMobile: boolean): Promise<void> {
+        await this.bingSearch(page, query, isMobile)
+        const url = new URL(page.url())
+        if (!['www.bing.com', 'bing.com'].includes(url.hostname) || url.pathname !== '/search' || url.searchParams.get('q') !== query)
+            throw new Error('Bing search result was not confirmed')
+        await page.locator('#b_results').waitFor({ state: 'visible', timeout: 15000 })
+    }
 
     public async doSearch(page: Page, isMobile: boolean, budget?: number): Promise<number> {
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
@@ -173,24 +182,35 @@ export class Search extends BaseActivity {
                 await page.keyboard.press('Home')
                 await searchBox.waitFor({ state: 'visible', timeout: 15000 })
 
-                await this.bot.utils.wait(1000)
+                await waitForActivity(this.bot, 1000)
                 await this.bot.browser.utils.ghostClick(page, SEARCH_BOX, { clickCount: 3 })
                 await searchBox.fill('')
 
-                await page.keyboard.type(query, { delay: this.bot.utils.randomDelay(45, 90) })
-                await page.keyboard.press('Enter')
-                await this.bot.utils.wait(3000)
+                if (this.bot.executionPlan?.urgent) await page.locator('#sb_form_q').fill(query)
+                else await page.keyboard.type(query, { delay: this.bot.utils.randomDelay(45, 90) })
+                const ready = this.bot.executionPlan?.urgent
+                    ? page.waitForURL(url => url.searchParams.get('q') === query, {
+                          waitUntil: 'domcontentloaded',
+                          timeout: 15000
+                      })
+                    : null
+                if (ready) {
+                    await Promise.all([ready, page.keyboard.press('Enter')])
+                    await page.locator('#b_results').waitFor({ state: 'visible', timeout: 15000 })
+                } else await page.keyboard.press('Enter')
+                await waitForActivity(this.bot, 3000)
 
                 if (this.bot.config.searchSettings.scrollRandomResults) {
-                    await this.bot.utils.wait(2000)
+                    await waitForActivity(this.bot, 2000)
                     await this.randomScroll(page, isMobile)
                 }
                 if (this.bot.config.searchSettings.clickRandomResults) {
-                    await this.bot.utils.wait(2000)
+                    await waitForActivity(this.bot, 2000)
                     await this.clickRandomLink(page, isMobile)
                 }
 
-                await this.bot.utils.wait(
+                await waitForSearch(
+                    this.bot,
                     this.bot.utils.randomDelay(
                         this.bot.config.searchSettings.searchDelay.min,
                         this.bot.config.searchSettings.searchDelay.max
@@ -205,7 +225,7 @@ export class Search extends BaseActivity {
                     `Search attempt ${attempt}/${MAX_QUERY_ATTEMPTS} failed | query="${query}" | ${error instanceof Error ? error.message : String(error)}`
                 )
                 if (attempt === MAX_QUERY_ATTEMPTS) throw error
-                await this.bot.utils.wait(2000)
+                await waitForActivity(this.bot, 2000)
             }
         }
     }
@@ -229,7 +249,7 @@ export class Search extends BaseActivity {
         try {
             const searchPageUrl = page.url()
             await this.bot.browser.utils.ghostClick(page, RESULT_LINK)
-            await this.bot.utils.wait(this.bot.config.searchSettings.searchResultVisitTime)
+            await waitForActivity(this.bot, this.bot.config.searchSettings.searchResultVisitTime)
 
             if (isMobile) {
                 await page.goto(searchPageUrl)

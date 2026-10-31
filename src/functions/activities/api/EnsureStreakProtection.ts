@@ -1,3 +1,4 @@
+import { waitForActivity } from '../../../util/ActivityTiming'
 import { URLs } from '../../../constants/urls'
 import { BaseActivity } from '../BaseActivity'
 
@@ -13,6 +14,7 @@ export class EnsureStreakProtection extends BaseActivity {
     public async ensureStreakProtection() {
         const resolved = this.resolveActionId()
         if (!resolved) {
+            this.bot.logger.markWorkerFailure()
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'ENABLE-STREAK-PROTECTION',
@@ -68,12 +70,14 @@ export class EnsureStreakProtection extends BaseActivity {
                     'green'
                 )
             } else if (after === null) {
+                this.bot.logger.markWorkerFailure()
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'ENABLE-STREAK-PROTECTION',
                     `Fired but could not confirm state from a fresh snapshot | acknowledged=${acknowledged} | status=${status}`
                 )
             } else {
+                this.bot.logger.markWorkerFailure()
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'ENABLE-STREAK-PROTECTION',
@@ -81,7 +85,7 @@ export class EnsureStreakProtection extends BaseActivity {
                 )
             }
 
-            await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 10000))
+            await waitForActivity(this.bot, this.bot.utils.randomDelay(5000, 10000))
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,

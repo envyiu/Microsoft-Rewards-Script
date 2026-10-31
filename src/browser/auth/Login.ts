@@ -4,6 +4,7 @@ import type { MicrosoftRewardsBot } from '../../index'
 import { saveStorageState } from '../../util/SessionStore'
 import { unknownPageDiagnostic } from '../../util/ErrorDiagnostic'
 import { configureMediaBlocking, suspendMediaBlocking } from '../MediaBlocker'
+import { mapFlyoutToDashboard, type RewardsFlyoutData } from '../FlyoutDashboard'
 
 import { MobileAccessLogin } from './methods/MobileAccessLogin'
 import { EmailLogin } from './methods/EmailLogin'
@@ -14,6 +15,8 @@ import { RecoveryLogin } from './methods/RecoveryEmailLogin'
 import { canPromptForInput } from './methods/LoginUtils'
 
 import type { Account } from '../../interface/Account'
+import { isAccountReviewUrl } from './AuthorizationRoute'
+import { runRewardsOnboarding } from '../../functions/RewardsOnboarding'
 
 type LoginState =
     | 'EMAIL_INPUT'
@@ -54,6 +57,14 @@ export class Login {
     private readonly capturedUnknownUrls = new Set<string>()
     private signInMethodsLogged = false
     private passwordlessMethodSelected = false
+    private recoveredRewardsLogin = false
+    private unknownRewardsEarnChecks = 0
+    private recoveredRewardsEarn = false
+    private rewardsLogin = true
+    private firstPartyWelcomeActions = 0
+    private serviceHost: string | null = null
+    private serviceHosts: string[] = []
+    private unknownServiceChecks = 0
 
     private readonly selectors = {
         primaryButton: 'button[data-testid="primaryButton"]',
@@ -92,16 +103,29 @@ export class Login {
         this.recoveryLogin = new RecoveryLogin(this.bot)
     }
 
-    async login(page: Page, account: Account) {
+    async login(page: Page, account: Account, { rewards = true, startUrl = undefined as string | undefined } = {}) {
+        this.rewardsLogin = rewards
+        this.firstPartyWelcomeActions = 0
+        this.serviceHost = startUrl ? new URL(startUrl).hostname : null
+        this.serviceHosts = this.serviceHost === 'to-do.live.com' ? ['to-do.live.com', 'to-do.microsoft.com', 'todo.microsoft.com', 'todo.cloud.microsoft', 'to-do.office.com'] : this.serviceHost ? [this.serviceHost] : []
+        this.unknownServiceChecks = 0
+        if (startUrl && (rewards || !['onedrive.live.com', 'to-do.live.com', 'outlook.live.com'].includes(this.serviceHost || '')))
+            throw new Error('Unsupported Microsoft service sign-in destination')
         try {
             suspendMediaBlocking(this.bot, page.context())
             this.capturedUnknownUrls.clear()
             this.signInMethodsLogged = false
             this.passwordlessMethodSelected = false
+            this.recoveredRewardsLogin = false
+            this.unknownRewardsEarnChecks = 0
+            this.recoveredRewardsEarn = false
             this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Starting login process')
 
+            const hasStoredAuth = await this.hasStoredAuthCookies(page)
+            if (hasStoredAuth)
+                this.bot.logger.info(this.bot.isMobile, 'LOGIN', rewards ? 'Checking saved session on Rewards earn page' : 'Checking saved session on Microsoft/Bing')
             await page
-                .goto(URLs.rewards.userLogin, {
+                .goto(rewards ? (hasStoredAuth ? URLs.rewards.earn : URLs.rewards.userLogin) : startUrl || URLs.auth.bingSignIn, {
                     waitUntil: 'domcontentloaded'
                 })
                 .catch(() => {})
@@ -115,12 +139,14 @@ export class Login {
             let sameStateCount = 0
 
             while (iteration < maxIterations) {
+                if (this.bot.shuttingDown) throw new Error('Login interrupted by session checkpoint')
                 if (page.isClosed()) throw new Error('Page closed unexpectedly')
 
                 iteration++
                 this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `State check iteration ${iteration}/${maxIterations}`)
 
                 const state = await this.detectCurrentState(page)
+                if (this.bot.shuttingDown) throw new Error('Login interrupted by session checkpoint')
                 this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `Current state: ${state}`)
 
                 if (state !== previousState && previousState !== 'UNKNOWN') {
@@ -157,6 +183,7 @@ export class Login {
                 }
 
                 const shouldContinue = await this.handleState(state, page, account)
+                if (this.bot.shuttingDown) throw new Error('Login interrupted by session checkpoint')
                 if (!shouldContinue) {
                     throw new Error(`Login failed or aborted at state: ${state}`)
                 }
@@ -168,8 +195,19 @@ export class Login {
                 throw new Error('Login timeout: exceeded maximum iterations')
             }
 
-            await this.finalizeLogin(page, account)
+            if (rewards) await this.finalizeLogin(page, account)
+            else {
+                const cookies = await page.context().cookies(URLs.bing.origin)
+                if (!cookies.some(c => c.name === '_U' && c.value)) throw new Error('Bing sign-in is not confirmed; manual authentication required')
+                saveStorageState(this.bot.config.sessionPath, account.email, this.bot.isMobile, await page.context().storageState())
+                await configureMediaBlocking(this.bot, page.context())
+                this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Microsoft/Bing login completed without Rewards')
+            }
         } catch (error) {
+            if (this.bot.shuttingDown) {
+                this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Login interrupted by session checkpoint')
+                throw error
+            }
             this.bot.logger.error(
                 this.bot.isMobile,
                 'LOGIN',
@@ -184,6 +222,17 @@ export class Login {
 
         const url = new URL(page.url())
         const hostname = url.hostname.toLowerCase()
+        if (!this.rewardsLogin && this.serviceHosts.includes(hostname)) {
+            const guest = page.getByRole('button', { name: /^sign in$/i }).or(page.getByRole('link', { name: /^sign in$/i })).first()
+            const credentials = page.locator('input[type="password"], input#usernameEntry').first()
+            const text = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+            if (text.trim().length > 20 && !/^loading[.\s…]*$/i.test(text.trim()) && !await guest.isVisible().catch(() => false) && !await credentials.isVisible().catch(() => false) &&
+                (await page.context().cookies(URLs.bing.origin)).some(c => c.name === '_U' && c.value)) return 'LOGGED_IN'
+        }
+        if (!this.rewardsLogin && (hostname === 'bing.com' || hostname === 'www.bing.com')) {
+            const cookies = await page.context().cookies(URLs.bing.origin)
+            if (cookies.some(c => c.name === '_U' && c.value)) return 'LOGGED_IN'
+        }
         this.bot.logger.debug(this.bot.isMobile, 'DETECT-STATE', `Current URL: ${hostname}${url.pathname}`)
 
         if (hostname === 'chromewebdata') {
@@ -197,14 +246,18 @@ export class Login {
             return 'ACCOUNT_LOCKED'
         }
 
-        if (hostname === 'bing.com' || hostname.endsWith('.bing.com') || hostname === 'account.microsoft.com') {
+        const isRewardsAuthRoute = hostname === 'rewards.bing.com' && /^\/auth(?:\/|$)/i.test(url.pathname)
+        if (
+            !isRewardsAuthRoute &&
+            (hostname === 'bing.com' || hostname.endsWith('.bing.com') || hostname === 'account.microsoft.com')
+        ) {
             const [profileVisible, accountProfileVisible, sessionCookies] = await Promise.all([
                 this.checkSelector(page, this.selectors.bingProfile),
                 this.checkSelector(page, this.selectors.microsoftAccountProfile),
                 page
                     .context()
-                    .cookies()
-                    .then(cookies => cookies.some(cookie => ['MUID', '_U', 'ANON', 'RPSSecAuth'].includes(cookie.name)))
+                    .cookies([page.url()])
+                    .then(cookies => cookies.some(cookie => ['_U', 'RPSSecAuth'].includes(cookie.name) && cookie.value))
                     .catch(() => false)
             ])
             const rewardsEvidence =
@@ -216,6 +269,9 @@ export class Login {
                     .catch(() => false))
             if (profileVisible || accountProfileVisible || (sessionCookies && rewardsEvidence)) {
                 this.bot.logger.debug(this.bot.isMobile, 'DETECT-STATE', 'Authenticated session evidence found')
+                return 'LOGGED_IN'
+            }
+            if (hostname === 'rewards.bing.com' && (await this.hasAuthenticatedRewardsPayload(page))) {
                 return 'LOGGED_IN'
             }
             this.bot.logger.debug(
@@ -343,8 +399,39 @@ export class Login {
             }
         }
 
-        this.bot.logger.debug(this.bot.isMobile, 'DETECT-STATE', `Returning first found state: ${foundStates[0]}`)
-        return foundStates[0] as LoginState
+        const fallbackState = foundStates[0] ?? 'UNKNOWN'
+        this.bot.logger.debug(this.bot.isMobile, 'DETECT-STATE', `Returning fallback state: ${fallbackState}`)
+        return fallbackState
+    }
+
+    private async hasAuthenticatedRewardsPayload(page: Page): Promise<boolean> {
+        try {
+            // The current mobile Rewards dashboard omits the old Bing/MeControl
+            // selectors and may not expose an _U cookie on the Rewards host.
+            // Verify the personalized membership payload in the rendered page.
+            const { account } = this.bot.browser.react.snapshotPage(await page.content())
+            const membership = [account.pointsProgress, account.pointsRemaining, account.lifetimeEarn]
+            const membershipConfirmed =
+                Number.isSafeInteger(account.level) &&
+                Number(account.level) >= 1 &&
+                membership.every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)
+            // Brand-new members have no lifetime counter yet. Their personalized
+            // membership progress plus the first-visit welcome is still valid.
+            const firstVisit = Number.isSafeInteger(account.level) && Number(account.level) >= 1 &&
+                [account.pointsProgress, account.pointsRemaining].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0) &&
+                await page.getByRole('heading', { name: /welcome to\s*microsoft rewards/i }).first().isVisible().catch(() => false) &&
+                await page.getByRole('button', { name: /^get started$/i }).first().isVisible().catch(() => false)
+            const confirmed = membershipConfirmed || firstVisit
+            if (confirmed)
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'LOGIN',
+                    'Authenticated Rewards membership payload verified on the rendered page'
+                )
+            return confirmed
+        } catch {
+            return false
+        }
     }
 
     private async checkSelector(page: Page, selector: string): Promise<boolean> {
@@ -759,9 +846,10 @@ export class Login {
             case 'CHROMEWEBDATA_ERROR': {
                 this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'chromewebdata error detected, attempting recovery')
                 try {
-                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', `Navigating to ${REWARDS_BASE_URL}`)
+                    const destination = this.rewardsLogin ? REWARDS_BASE_URL : URLs.bing.origin
+                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', `Navigating to ${destination}`)
                     await page
-                        .goto(REWARDS_BASE_URL, {
+                        .goto(destination, {
                             waitUntil: 'domcontentloaded',
                             timeout: 10000
                         })
@@ -886,6 +974,65 @@ export class Login {
             case 'UNKNOWN': {
                 const rawUrl = page.url()
                 const url = new URL(rawUrl)
+                if (!this.rewardsLogin && this.serviceHost === 'onedrive.live.com' && url.hostname === 'www.microsoft.com' &&
+                    /\/onedrive\//i.test(url.pathname) && this.firstPartyWelcomeActions < 2) {
+                    const links = page.getByRole('link', { name: /^sign in$/i })
+                    const count = await links.count()
+                    for (let index = count - 1; index >= 0; index--) {
+                        const link = links.nth(index)
+                        if (!await link.isVisible().catch(() => false)) continue
+                        const href = await link.getAttribute('href')
+                        if (!href) continue
+                        const destination = new URL(href, rawUrl)
+                        if (!['go.microsoft.com', 'onedrive.live.com', 'login.live.com'].includes(destination.hostname) || destination.protocol !== 'https:') continue
+                        this.firstPartyWelcomeActions++
+                        await page.goto(destination.href, { waitUntil: 'domcontentloaded', timeout: 20000 })
+                        return true
+                    }
+                }
+                if (!this.rewardsLogin && this.firstPartyWelcomeActions < 3 &&
+                    (url.hostname === 'privacynotice.account.microsoft.com' || url.hostname === 'account.microsoft.com')) {
+                    const text = await page.locator('body').innerText({ timeout: 2000 }).catch(() => '')
+                    if (/privacy notice|terms of (?:use|service)|welcome to microsoft/i.test(text)) {
+                        const button = page.getByRole('button', { name: /^(?:next|continue|accept|i agree)$/i }).first()
+                        if (await button.isVisible().catch(() => false)) {
+                            this.firstPartyWelcomeActions++
+                            await button.click({ timeout: 5000 })
+                            return true
+                        }
+                    }
+                }
+                if (!this.rewardsLogin && this.serviceHost && ++this.unknownServiceChecks >= 8)
+                    throw new Error('Microsoft service initialization requires manual action')
+                if (url.hostname === 'rewards.bing.com' && /^\/(?:earn|dashboard)\/?$/i.test(url.pathname)) {
+                    this.unknownRewardsEarnChecks++
+                    if (this.unknownRewardsEarnChecks >= 3 && !this.recoveredRewardsEarn) {
+                        this.recoveredRewardsEarn = true
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'LOGIN',
+                            'Rewards page did not render a recognizable state; reloading once with the existing session'
+                        )
+                        await this.recoverFromLoginPostback(page)
+                        return true
+                    }
+                } else {
+                    this.unknownRewardsEarnChecks = 0
+                }
+                if (
+                    url.hostname === 'rewards.bing.com' &&
+                    /^\/auth\/login\/?$/i.test(url.pathname) &&
+                    !this.recoveredRewardsLogin
+                ) {
+                    this.recoveredRewardsLogin = true
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'LOGIN',
+                        'Rewards login route did not advance; checking the earn page once before continuing sign-in'
+                    )
+                    await this.recoverFromLoginPostback(page)
+                    return true
+                }
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'LOGIN',
@@ -917,7 +1064,7 @@ export class Login {
 
     private async recoverFromLoginPostback(page: Page): Promise<void> {
         await page
-            .goto(URLs.rewards.earn, {
+            .goto(this.rewardsLogin ? URLs.rewards.earn : URLs.bing.origin, {
                 waitUntil: 'domcontentloaded',
                 timeout: 15000
             })
@@ -955,9 +1102,16 @@ export class Login {
 
         // Dismiss at rewards dashboard
         await this.bot.browser.utils.tryDismissAllMessages(page).catch(() => {})
+        await runRewardsOnboarding(this.bot, page, account.newAccountMode === true)
 
         this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Starting Bing session verification')
-        await this.verifyBingSession(page, account)
+        const bingVerified = await this.verifyBingSession(page, account)
+        if (!bingVerified)
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'LOGIN-BING',
+                'Rewards sign-in is available, but Bing sign-in is unverified; app authorization is checked separately'
+            )
 
         this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Acquiring rewards context')
         await this.getRewardsSession(page)
@@ -975,6 +1129,41 @@ export class Login {
         this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Login completed, session saved')
     }
 
+    private async hasStoredAuthCookies(page: Page): Promise<boolean> {
+        return page
+            .context()
+            .cookies([URLs.rewards.origin, URLs.bing.origin])
+            .then(cookies =>
+                cookies.some(cookie => ['_U', 'RPSSecAuth'].includes(cookie.name) && Boolean(cookie.value))
+            )
+            .catch(() => false)
+    }
+
+    private async hasAuthenticatedBingSession(page: Page): Promise<boolean> {
+        const cookies = await page
+            .context()
+            .cookies([URLs.bing.origin])
+            .catch(() => [])
+        if (!cookies.some(cookie => cookie.name === '_U' && Boolean(cookie.value))) return false
+        const profile = await page
+            .waitForSelector(this.selectors.bingProfile, { timeout: 1500 })
+            .then(() => true)
+            .catch(() => false)
+        if (profile) return true
+
+        // The mobile Bing homepage omits #id_n. Validate the same cookie jar
+        // against the existing flyout endpoint rather than forcing a new login.
+        try {
+            const response = await page.request.get(URLs.bing.rewardsFlyoutUserInfo, { timeout: 5000 })
+            if (response.status() !== 200) return false
+            const result: RewardsFlyoutData = await response.json()
+            mapFlyoutToDashboard(result)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     async verifyBingSession(page: Page, account: Account) {
         const url = URLs.auth.bingSignIn
         const loopMax = 5
@@ -982,6 +1171,24 @@ export class Login {
         this.bot.logger.info(this.bot.isMobile, 'LOGIN-BING', 'Verifying Bing session')
 
         try {
+            // Manual sessions open Rewards directly. Do not force a fresh interactive
+            // Bing sign-in when the stored browser session is already authenticated.
+            await page.goto(URLs.bing.origin, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
+            const landing = new URL(page.url())
+            const bingLanding =
+                (landing.hostname === 'bing.com' || landing.hostname.endsWith('.bing.com')) &&
+                landing.hostname !== 'rewards.bing.com'
+            if (bingLanding) {
+                if (await this.hasAuthenticatedBingSession(page)) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'LOGIN-BING',
+                        'Bing session verified from existing browser session'
+                    )
+                    return true
+                }
+            }
+            if (page.isClosed()) return false
             await page.goto(url, { waitUntil: 'networkidle', timeout: 10000 }).catch(() => {})
 
             for (let i = 0; i < loopMax; i++) {
@@ -989,6 +1196,14 @@ export class Login {
 
                 this.bot.logger.debug(this.bot.isMobile, 'LOGIN-BING', `Verification loop ${i + 1}/${loopMax}`)
 
+                if (isAccountReviewUrl(page.url())) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'LOGIN-BING',
+                        'Bing authorization redirected to account.live.com/Abuse; stopping this sign-in attempt without classifying the Rewards session as locked'
+                    )
+                    return false
+                }
                 const u = new URL(page.url())
                 const hostname = u.hostname.toLowerCase()
                 const atBingPage =
@@ -1012,23 +1227,24 @@ export class Login {
                 if (atBingPage) {
                     await this.bot.browser.utils.tryDismissAllMessages(page).catch(() => {})
 
-                    const signedIn = await page
-                        .waitForSelector(this.selectors.bingProfile, { timeout: 3000 })
-                        .then(() => true)
-                        .catch(() => false)
+                    const signedIn = await this.hasAuthenticatedBingSession(page)
 
                     this.bot.logger.debug(this.bot.isMobile, 'LOGIN-BING', `Profile element found: ${signedIn}`)
 
-                    if (signedIn || this.bot.isMobile) {
+                    if (signedIn) {
                         this.bot.logger.info(this.bot.isMobile, 'LOGIN-BING', 'Bing session verified successfully')
-                        return
+                        return true
                     }
                 }
 
                 await this.bot.utils.wait(1000)
             }
 
-            this.bot.logger.warn(this.bot.isMobile, 'LOGIN-BING', 'Could not verify Bing session, continuing anyway')
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'LOGIN-BING',
+                'Could not verify Bing session; Rewards and app authorization remain separate'
+            )
         } catch (error) {
             this.bot.logger.warn(
                 this.bot.isMobile,
@@ -1036,6 +1252,7 @@ export class Login {
                 `Verification error: ${error instanceof Error ? error.message : String(error)}`
             )
         }
+        return false
     }
 
     private async getRewardsSession(page: Page) {

@@ -1,5 +1,13 @@
 # Microsoft Rewards Script Control API
 
+Manager account import/edit accepts `newAccountMode: boolean`. New Outlook/Hotmail imports default to true; existing accounts remain unchanged. Account responses expose `newAccount` with phase, first-success time, 168-hour deadline, service visits and daily count-only Bing queries. Workers require capability `preRewardsV1`. `warmup` Smart jobs never bootstrap Rewards or request its points; manual Desktop/Mobile windows receive the same pre-Rewards guard from the accepted worker state. Recovery email remains a private credential field and is not returned by this API.
+
+> Standalone installations use the [Manager API](../../../rewards-dashboard/manager/ARCHITECTURE.md)
+> on loopback port **3012** for account/configuration/assignment writes and the
+> [Worker](../worker/README.md) on **3010** for execution. The original setup and
+> cron/coordinator instructions below describe compatibility mode. Do not enable
+> worker account writes or dashboard cron to work around the standalone boundary.
+
 A small, dependency-free HTTP API that lets a dashboard or another local tool
 control and observe the Microsoft Rewards Script.
 
@@ -14,6 +22,8 @@ The API can:
   and diagnostic captures;
 - list stored session metadata and delete the mobile/desktop sessions belonging
   to one account;
+- open and stop durable account-bound Damru Android workers through the local
+  host bridge, without returning proxy credentials;
 - read `config.json` and, when explicitly enabled, validate and update it;
 - read the effective cron schedule and, in Docker API mode, persist and apply
   schedule changes without restarting the container.
@@ -480,6 +490,11 @@ console.log(data)
         "GET /history",
         "GET /accounts",
         "GET /sessions",
+        "GET /android-sessions",
+        "POST /android-sessions",
+        "POST /android-sessions/:accountIndex/viewer",
+        "POST /android-sessions/:accountIndex/stop",
+        "DELETE /android-sessions/:accountIndex",
         "GET /diagnostics",
         "GET /events",
         "GET /config",
@@ -578,6 +593,15 @@ Representative response:
                 "finalPoints": null,
                 "earnable": { "mobile": 60, "browser": 90, "app": 30 },
                 "searchSummary": { "mobile": 60, "desktop": 90, "bonus": 0, "total": 150 },
+                "rewardsStreak": {
+                    "version": 1,
+                    "email": "user@example.com",
+                    "dailyCounter": 9,
+                    "status": "fresh",
+                    "source": "rewards-page",
+                    "observedAt": "2026-07-14T11:30:44.000Z",
+                    "partners": []
+                },
                 "streakProtection": {
                     "enabled": true,
                     "remainingDays": 1,
@@ -984,6 +1008,26 @@ The `runs`, `totalCollected`, `successStreak`, and `last*` fields are calculated
 from this API process's in-memory history and therefore reset after an API
 restart.
 
+### `POST /accounts/check-ip`
+
+Checks the public egress IP for configured accounts using [ipify](https://www.ipify.org/). Send `{}` to check all
+accounts, or `{"accountIndexes":[2]}` to check only `ACCOUNT_2`. Multiple indexes are supported. Empty arrays,
+unknown slots and non-integer indexes return `400` before any network request is made.
+
+The check uses the account's browser proxy configuration, including authenticated HTTP/SOCKS5 proxies. It uses the
+proxy even when `proxyHttp` is disabled; accounts without a proxy use a direct connection. It does not log in to
+Microsoft or start an account run. A proxy error is reported for that account without falling back to a direct IP.
+Up to four checks run concurrently, with an eight-second timeout per IP request.
+
+The response contains `results`, `count` and `succeeded`. Each result has `accountIndex`, `ip` (or `null`),
+`family`, `route` (`proxy` or `direct`), `checkedAt`, `durationMs` and `error` (or `null`). Proxy credentials and
+raw transport errors are never returned. `GET /accounts` also includes the latest result in `ipCheck`; these
+results are kept in memory until API restart and invalidated when the account identity or proxy changes.
+
+Normal API authentication applies. Account-write permissions are not required because checks do not modify the
+account configuration. The dashboard exposes **Kiểm tra IP** on each configured account and **Kiểm tra IP tất cả**
+above the account list.
+
 ### Account writes
 
 Account writes are disabled unless `API_ALLOW_ACCOUNT_WRITE=true`. The dashboard
@@ -995,6 +1039,11 @@ keeps omitted secret fields, replaces supplied strings, and clears a secret when
 its value is explicitly `null`. `DELETE /accounts/:index` requires an idle bot,
 keeps at least one configured account, removes the account's Smart Scheduler
 profile and deletes its stored mobile/desktop sessions.
+
+The `proxy` object accepts `url`, `port`, `username`, `password`, and
+`proxyHttp`. Authenticated SOCKS5 uses the same separate username/password
+fields as HTTP(S) proxies; the browser and enabled HTTP client routes forward
+through a temporary loopback relay. SOCKS4 authentication remains unsupported.
 
 ## Session management
 
@@ -1064,6 +1113,29 @@ endpoint for deleting all sessions.
 The bot must be idle. Deleting while a run is starting, running, or stopping
 returns `409 Conflict`, because an active process could otherwise write the
 session back after deletion.
+
+## Account-bound Android sessions
+
+`GET /android-sessions` reports the worker, Android profile, worker state and
+scrcpy viewer state for each account. It never returns proxy URLs, credentials,
+or the account reference hash. `POST /android-sessions` accepts only
+`{ "accountIndex": 1 }`; when a proxy is configured, the API reads it from its
+local `.env`, URL-encodes credentials, and sends it only over the 0600 host
+bridge socket. Accounts without a proxy open with a direct connection. Use
+`POST /android-sessions/:accountIndex/viewer` to reopen a closed viewer and
+`POST /android-sessions/:accountIndex/stop` to stop the worker while retaining
+its volume and account mapping.
+
+`DELETE /android-sessions/:accountIndex` permanently removes the assigned Android
+container, its data volume and saved account-to-worker mapping. The Microsoft
+account configuration and desktop/mobile browser sessions are retained. The
+request must include `{ "worker": 0, "confirmation": "DELETE 0" }`, using the
+worker currently shown for that account (indexes start at 0). The backend verifies
+that the account still owns that worker. An active bot run, busy Android worker,
+or changed assignment returns `409`; invalid confirmation returns `400`. No
+assigned device returns `{ "deleted": false, "accountIndex": 1, "worker": null }`.
+Opening Android after deletion provisions a new device. Authentication is required
+as for the other Android lifecycle endpoints.
 
 **cURL**
 
@@ -1789,16 +1861,57 @@ Smart mode is disabled by default. Its configuration and daily state are atomica
   network locks.
 - `PUT /smart-schedule` validates and replaces the Smart Scheduler configuration.
 - `POST /smart-schedule/replan` rebuilds unfinished jobs; optionally pass `{"accountIndexes":[1,2]}`.
+- `GET /manual-sessions` lists browser windows opened for manual account use.
+- `POST /manual-sessions` with `{"accountIndex":1,"platform":"desktop"}` opens the account's desktop or mobile
+  session in a visible browser. If no stored session exists, it opens the Microsoft sign-in page and checkpoints the
+  new session while the window remains open. It does not run activities or searches. Close the browser window to save
+  the latest state and end the session. Every request opens another window, including while a run or another manual
+  browser window is active. Manual windows always request a visible browser even when `FORCE_HEADLESS` is set. On
+  Linux, the API also discovers the current user's Wayland socket when it was started without display variables.
+- `POST /manual-sessions/:accountIndex/close` with `{"platform":"desktop"}` checkpoints the current browser cookie
+  state, then gracefully closes all manual browser windows for that account and platform. Success requires a save
+  acknowledgment and clean process exit. A failed save keeps the browser open for retry; a timeout does not force-kill it.
+
+While a manual browser is open, Smart mode locks both its account and network group so automated sessions cannot
+overlap it. A legacy full run is rejected until all manual browser windows are closed. The browser opens on the
+machine running the Control API and therefore requires a graphical desktop there.
+
+Regular and urgent worker sessions record each completed worker independently. A later activity error or process
+failure preserves earlier `SMART-WORKER-END` markers; only unfinished workers consume retries. In particular, a
+More Promotions failure cannot undo a completed Daily Set and keep searches waiting on it. Failed promotions remain
+pending and never imply that points were credited.
+Worker state includes `workerRetryAt`, a map of retry deadlines by worker. Backoff belongs to the failed worker;
+ready workers can advance independently while preserving Daily Set → Search Perk → search ordering. Old shared
+retry deadlines migrate to this map for workers with failed attempts; attempt counts and completed work are retained.
 
 Each mobile/desktop platform state includes `quotaKnown`. A successfully parsed counter remains known when its
-remaining value reaches `0`; the platform is then marked complete and no further search job is planned that day. If
+remaining value reaches `0`; the platform is then marked complete until newer verified quota shows available points. If
 the counter cannot be read, `quotaKnown` is false and `remaining` is `null`; Smart mode keeps the platform pending,
 retries it with the configured backoff, and stops after `retry.maxAttempts` instead of treating unavailable data as
-zero or complete.
+zero or complete. A session that reads a positive quota but earns no points and does not reduce that quota follows
+the same bounded retry path. Retry backoff is preserved even when deadline catch-up is active.
+
+Successful sessions emit `SMART-QUOTA` snapshots with a timestamp and separate desktop/mobile counters. The planner
+reconciles those snapshots after a successful account run, ignoring stale, malformed, previous-day and unavailable
+data. A terminal platform with newly available points is reopened without losing query counts or completed workers.
+The same day/max/progress observation can restore its retry budget only once, preventing endless no-progress retries.
+The active search platform remains governed by its own `SMART-SEARCH-END` result.
+
+When all enabled search platforms are terminal and no workers remain pending, the planner may run a `type: "quota"`
+session. This restores the account's mobile browser session and reads its dashboard, then exits before activities,
+OAuth app tasks or searches. Quota checks keep the existing concurrency/account/proxy/manual locks and run windows,
+wait two hours after the latest quota observation/check attempt, and are limited to three attempts per account/day.
+Legacy terminal states without a check timestamp are eligible immediately. No new check starts in the final five
+minutes of the profile's local day. Check failures do not reset search retries or completed activities.
 
 When Smart mode is enabled, `POST /start` triggers a replan instead of launching a full run. Enabling Smart mode
 disables persisted bot cron, and legacy schedule endpoints reject attempts to re-enable cron until Smart mode is off.
 The dashboard's local scheduler applies the same mutual-exclusion rule.
+
+Profiles have no run-window restriction by default (`windows: []`). An enabled Smart Scheduler checks for a new
+calendar day in each profile's timezone every 30 seconds, resets that day's progress and starts eligible work,
+including after midnight. Explicit run windows and quiet hours still apply, and account/network locks can delay
+the start of a session. The API must remain running for this daily rollover to happen automatically.
 
 Example:
 
@@ -1818,7 +1931,7 @@ Example:
         {
             "accountIndex": 1,
             "timezone": "Asia/Ho_Chi_Minh",
-            "windows": [{ "start": "07:00", "end": "23:00" }],
+            "windows": [],
             "quietHours": [{ "start": "12:00", "end": "13:00" }],
             "deadline": "23:00",
             "allowedWorkers": ["dailySet", "morePromotions", "activateSearchPerk", "claimBonusPoints"]
@@ -2101,6 +2214,7 @@ All variables are optional.
 | `API_ALLOW_ENV_OVERRIDES`  | `false`                       | Permit arbitrary `env` fields in `/start` and `/restart`.                                   |
 | `API_ALLOW_CONFIG_REVEAL`  | `false`                       | Permit authenticated `GET /config?reveal=1`.                                                |
 | `API_VALIDATOR_MODULE`     | auto                          | Path to a compiled module exporting `validateConfig` or `ConfigSchema`.                     |
+| `DAMRU_BRIDGE_SOCKET`      | `/run/damru/bridge.sock`     | 0600 Unix socket used for account-bound Android workers/viewers.                             |
 | `SCHEDULE_FILE`            | `<repo>/config/schedule.json` | Override the persisted schedule file path.                                                  |
 | `CRON_SCHEDULE`            | unset                         | Base schedule reported and used when no persisted schedule override exists.                 |
 | `TZ`                       | `UTC`                         | Timezone used by cron and returned by `/schedule`.                                          |
@@ -2242,3 +2356,136 @@ starting a second unusable instance.
 | `trigger.js`        | Routes Docker cron and `RUN_ON_START` executions through the local API.               |
 | `runCommand.js`     | Cross-platform resolution of the command used to launch the bot.                      |
 | `lib.js`            | Environment, project-root, logging, config-redaction, and argument helpers.           |
+
+
+### Urgent scheduling for today
+
+`POST /smart-schedule/urgent` accepts `{ "enabled": true }` to start, or `{ "enabled": false }` to cancel. Requires the existing API authentication and schedule-write permission. An active legacy run returns `409 RUN_ACTIVE`.
+
+Urgent mode applies to the current local day of the enrolled profiles. It persists across API restarts, retries unfinished failed tasks with a fresh bounded attempt allowance once on activation, and preserves completed work. Repeated activation while active does not reset attempts. Existing sessions finish normally; newly launched sessions skip discretionary activity pacing, retain a 5–8 second pause after each search for credit to settle, and use full search budgets, stopping on actual quota completion or bounded no-progress/retry limits.
+
+The planner skips run windows, quiet hours, session cooldowns and retry backoff, fills independent network groups up to 32 concurrent sessions, and keeps account, network and manual-browser locks. Daily Set/Search Perk dependencies remain ordered, Visual Search stays isolated and bonus claims run last. Regular settings are not overwritten. Cancel returns to regular scheduling; saving `enabled: false` pauses both modes.
+
+`GET /smart-schedule` now includes `effectiveEnabled` and `urgent` (`active`, `status`, `startedAt`, `remaining`, `failed`, `expired`, `effectiveParallel`). Status is `idle`, `active`, `completed`, `incomplete`, `expired`, or `cancelled`. Expiry follows each profile's timezone; new accounts are not added to an active urgent run. Failed tasks are displayed as unfinished rather than reported as successful.
+
+
+### Browser closure logs
+
+Planned browser cleanup emits `BROWSER` at debug level (`Browser context closed during cleanup`) followed by the existing `CLOSE-BROWSER` info message. A context closing without a cleanup request still emits a warning (`Browser context closed unexpectedly`); renderer crashes remain errors. Older builds logged every context close as a warning, including successful cleanup.
+# Hybrid deployment
+
+See [Hybrid Smart mode](../hybrid/README.md) for independent VPS scheduling of proxied accounts, local direct accounts and Android, private SSH transport, durable event synchronization, and manual-session handoff. Existing Smart/account responses gain optional `node`, `nodeOnline` and `hybrid` metadata when enabled. The internal session/configuration transport is authenticated and is not exposed by the dashboard.
+
+### Fleet: retry selected accounts
+
+`POST /smart-schedule/retry` accepts `{ "accountIndexes": [23, 24], "preempt": false }`
+with the same authentication and schedule-write permission as other fleet controls.
+The coordinator validates the entire selection before dispatch and routes each account
+only to its owner. Retry checkpoints selected active jobs, clears their failure limits
+and retry cooldowns, preserves completed work, and queues the selection again.
+With `preempt: true`, it also checkpoints other active jobs on the affected nodes to
+free capacity for the selected accounts. Ownership, configured schedules, manual locks,
+network-group exclusion and concurrency limits remain enforced. HTTP 202 includes
+per-node `results`; it acknowledges dispatch, not successful Microsoft authentication.
+
+### Verified account execution and per-account Stop
+
+`GET /accounts` includes `execution` for each configured account. `GET /status`
+and `GET /smart-schedule` include the same execution map under `smart.execution`
+and `execution`, respectively. States are `starting`, `running`, `stopping`,
+`idle`, or `unknown`; fields include `observedAt`, `nodeId`, `jobId`, `phase`,
+`pid`, and `nextEligibleAt`. A VPS observation expires after 15 seconds or
+immediately when its node is unreachable. Cached logs and old job lists are
+not evidence of a running process. `jobId` identifies one process execution,
+not the reusable planner job ID.
+
+`POST /smart-schedule/accounts/:index/stop` accepts `{ "jobId": "..." }` and
+requires schedule-write permission. It routes to the account's owner, rejects
+a changed execution with HTTP 409 (`JOB_CHANGED`), and is idempotent once that
+execution has stopped. Success is HTTP 200 with `stopped`, `sessionSaved` and
+`nextEligibleAt` (or `alreadyStopped`). `sessionSaved: false` means termination
+was confirmed but a saved-session checkpoint was not confirmed.
+
+Stop interrupts only that account, preserves completed work and failure
+counters, and defers automatic execution by the configured minimum cooldown.
+The persisted cooldown also applies to Urgent mode and survives restart.
+Explicit single-account Run or targeted retry clears it. Other accounts and
+the node's schedule remain enabled. Unknown VPS runtime returns HTTP 503
+(`RUNTIME_UNKNOWN`) rather than claiming the account was stopped.
+
+
+## Standalone Manager / Worker deployments
+
+New installations use `scripts/worker/server.js` and worker protocol **3**.
+The worker entrypoint requires a loopback API host, a token and `MRS_WORKER_DATA`;
+it never loads account credentials from the source checkout. Accepted snapshots,
+sessions, scheduler progress and event journals live in its private data directory.
+
+The standalone Manager lives in the `rewards-dashboard` repository. It owns account
+configuration, assignments and SSH enrollment and does not load a browser runtime.
+See [Worker installation](../worker/README.md) and the Manager installation guide.
+The legacy `npm run api`, Hybrid and Fleet entry points remain for migration and
+rollback; they are excluded from the new worker deployment flow.
+
+Protocol 3 retains authenticated `/internal/hybrid/status`, `snapshot`, `events`,
+`stage-session/:uuid`, `control` and `accounts/:index/hold|release|delete-session`.
+Status adds `capabilities`, `installation`, applied `revision`, `generation` and
+manual-session exit state. Snapshots use protocolVersion 3, coordinator authority,
+monotonic generation, a content revision, assigned account environment, bot config
+and the assigned subset of Smart profiles. Destination activation may include
+staged sessions/progress and initial handoff holds. A different authority or an
+older generation cannot replace an accepted/pending configuration. Account/config
+management writes are unavailable on the public worker API; Manager sends
+validated snapshots. Manual browser and Android routes require worker capabilities.
+These private transport routes are never forwarded to dashboard clients.
+
+### Account-scoped manual holds and live membership snapshots
+
+`POST /internal/hybrid/accounts/:index/hold` accepts a UUID `token`, boolean
+`wait`, and optional `scope: "account" | "group"` (default `group` for legacy
+compatibility). `initialHolds` in destination snapshots carry the same scope.
+Standalone Desktop/Mobile/Android requests use **account** scope and `wait: true`:
+only that account's active job yields `WAITING_FOR_RUN`. Another account sharing
+its proxy is not stopped and does not prevent an idle account's manual open.
+The durable hold remains while waiting; failed checkpoints never release it.
+
+Scheduler account-only locks use `networkGroup: null`, blocking the account
+without reserving its proxy group. A normal assignment move still expands and
+holds the proxy group. Do not infer lock scope from the account's proxy alone.
+
+Workers can apply membership-only snapshots beside running jobs through
+`Hybrid.canApplyMembershipSnapshot`: each running account must remain assigned;
+retained account environments, profiles and group overrides must be unchanged;
+node bot/schedule settings must be unchanged; removed accounts must be held.
+General config edits retain drain behavior. Authority/generation validation and
+source/destination acknowledgement apply equally to this path.
+
+Manager routes manual browser and Android actions to local after temporary
+account-only handoff. Desktop/mobile storage state, fingerprint and region return
+to the original owner after clean browser closure. Android uses the existing
+Damru device/login, separate from browser cookies; it must stop before return.
+Closing only its viewer leaves the account held. Unknown exits remain held.
+
+Manager assignment cancellation before destination activation uses a durable
+`cancelling` phase: source roster acknowledgement precedes hold release. Completed
+ownership changes must be reversed through the normal transfer protocol.
+
+### Rewards observations and verification
+
+`REWARDS-STREAK` is a version-1 structured JSON log event, normalized by
+`@msrw/contracts/rewards`. `rewardsStreak` is available in run/account/points/history
+summaries: `dailyCounter` is a nonnegative integer or null, `status` is `fresh` or
+`unknown`, `observedAt` is ISO UTC, `source` is `rewards-page`, and `partners`
+contains independent Bing, Daily Set, Edge/app streak progress. Protection remains
+separate. Neither successful runs nor partner counters can synthesize daily streak.
+Manager/Worker journals retain these events and dashboard rejects older observations
+while retaining a labelled last-known count after unknown reads.
+
+Quest COMPLETE requires a newly fetched completed parent; acknowledgments and
+balance changes alone do not qualify. `punchCards` Smart completion can also mean
+today's executable steps have been checked and only explicit app/multi-day/locked/
+manual-claim conditions remain. `PUNCHCARD` quest-step and `MORE-PROMOTIONS`
+card-status logs expose the reason. Missing data/hashes and failed verification
+leave the worker pending. Keep earning ordinary web visits preserve activity
+opt-outs, browser identity/proxy/session, and never follow app installers or
+redemption links as a generic fallback.

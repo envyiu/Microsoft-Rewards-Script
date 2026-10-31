@@ -73,8 +73,8 @@ test('bulk duplicates and invalid proxies fail without writing', () => {
             error => error.code === 'DUPLICATE_ACCOUNT'
         )
         assert.throws(
-            () => addAccounts(root, [{ email: 'another@example.test', proxy: { url: 'socks5://proxy', port: 1, username: 'u', password: 'p' } }], env),
-            /SOCKS proxy authentication/
+            () => addAccounts(root, [{ email: 'another@example.test', proxy: { url: 'socks4://proxy', port: 1, username: 'u', password: 'p' } }], env),
+            /SOCKS4 proxy authentication/
         )
         assert.throws(
             () => addAccounts(root, [{ email: 'another@example.test', langCode: 'en\nACCOUNT_9_EMAIL=injected@example.test' }], env),
@@ -85,6 +85,37 @@ test('bulk duplicates and invalid proxies fail without writing', () => {
             /geoLocale or langCode is invalid/
         )
         assert.equal(fs.readFileSync(envFile, 'utf8'), before)
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true })
+    }
+})
+
+test('account import accepts authenticated SOCKS5 and keeps credentials out of summaries', () => {
+    const { root, env, envFile } = fixture()
+    try {
+        const result = addAccounts(
+            root,
+            [
+                {
+                    email: 'proxy@example.test',
+                    proxy: {
+                        url: 'socks5://proxy.example.test',
+                        port: 1080,
+                        username: 'proxy-user',
+                        password: 'proxy-secret'
+                    }
+                }
+            ],
+            env
+        )
+
+        assert.equal(result.accounts[0].proxy.hasCredentials, true)
+        assert.equal(JSON.stringify(result).includes('proxy-secret'), false)
+        assert.equal(env.ACCOUNT_1_PROXY_URL, 'socks5://proxy.example.test')
+        assert.equal(env.ACCOUNT_1_PROXY_PORT, '1080')
+        assert.equal(env.ACCOUNT_1_PROXY_USERNAME, 'proxy-user')
+        assert.equal(env.ACCOUNT_1_PROXY_PASSWORD, 'proxy-secret')
+        assert.match(fs.readFileSync(envFile, 'utf8'), /ACCOUNT_1_PROXY_URL=socks5:\/\/proxy\.example\.test/)
     } finally {
         fs.rmSync(root, { recursive: true, force: true })
     }

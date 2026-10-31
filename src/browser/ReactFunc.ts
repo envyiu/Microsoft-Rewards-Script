@@ -1,3 +1,4 @@
+import { pointValue } from '../util/PointAccounting'
 import type { MicrosoftRewardsBot } from '../index'
 
 export interface ParsedOffer {
@@ -6,11 +7,16 @@ export interface ParsedOffer {
     title: string
     description: string
     points: number
+    pointProgress?: number | null
     promotionSubtype: string | null
+    promotionType?: string | null
+    name?: string | null
     destination: string
     isCompleted: boolean
     isPromotional: boolean
     isLocked: boolean
+    isDisabled?: boolean
+    activityProgressMax?: number | null
     unlockCriteria: string | null
     date: string | null
     activityType: number | null
@@ -21,10 +27,19 @@ export interface QuestChild {
     offerId: string
     hash: string | null
     points: number
+    pointProgress?: number | null
     isCompleted: boolean
     isLocked: boolean
     isDisabled: boolean
     reportable: boolean
+    title?: string
+    description?: string
+    destination?: string
+    promotionType?: string | null
+    activityType?: number | null
+    isPromotional?: boolean
+    unlockCriteria?: string | null
+    activityProgressMax?: number | null
 }
 
 export interface ParentQuest {
@@ -32,10 +47,13 @@ export interface ParentQuest {
     title: string
     pointProgressMax: number
     complete: boolean
+    completedTasks?: number
+    totalTasks?: number
 }
 
 export interface StreakState {
     partner: string
+    resetAt?: string | null
     activitiesCompleted: number
     activitiesTotal: number
     completedDays: number
@@ -76,9 +94,13 @@ export interface SearchPointsCounters {
 
 export interface PageSnapshot {
     offers: ParsedOffer[]
+    dailySet: ParsedOffer[] | null
     reportable: ParsedOffer[]
     streaks: StreakState[]
     streakProtection: StreakProtectionState | null
+    dailyStreak: number | null
+    unmatchedEarnCards?: number
+    morePromotionsAvailable: boolean
     account: AccountState
 }
 
@@ -94,24 +116,103 @@ export default class ReactFunc {
         const combined = this.concatFlightChunks(html)
 
         const offers = this.parseOffers(combined)
+        const dailySet = this.parseDailySet(combined)
+        // The active set's expiry comes from Rewards, so it remains valid when
+        // the worker's UTC date differs from the account's local day.
+        for (const daily of dailySet ?? []) {
+            const index = offers.findIndex(offer => offer.offerId === daily.offerId)
+            if (index < 0) offers.push(daily)
+            else offers[index] = daily
+        }
         const streaks = this.parseStreaks(combined)
         const streakProtection = this.parseStreakProtection(combined)
+        const dailyStreak = this.parseDailyStreak(combined)
+        if (streakProtection) streakProtection.streakCounter = dailyStreak
         const account = this.parseAccountData(combined)
         const accountEmail = this.bot.currentAccountEmail
+
+        if (accountEmail)
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'REWARDS-STREAK',
+                JSON.stringify({
+                    version: 1,
+                    email: accountEmail,
+                    dailyCounter: dailyStreak,
+                    status: dailyStreak === null ? 'unknown' : 'fresh',
+                    source: 'rewards-page',
+                    observedAt: new Date().toISOString(),
+                    partners: streaks.map(
+                        ({
+                            partner,
+                            completedDays,
+                            totalDays,
+                            activitiesCompleted,
+                            activitiesTotal,
+                            isEnabled,
+                            isCurrentDayCompleted
+                        }) => ({
+                            partner,
+                            completedDays,
+                            totalDays,
+                            activitiesCompleted,
+                            activitiesTotal,
+                            isEnabled,
+                            isCurrentDayCompleted
+                        })
+                    )
+                })
+            )
 
         this.bot.logger.info(
             this.bot.isMobile,
             'REACT-PARSE',
-            `Snapshot complete | offers=${offers.length} | reportable=${offers.filter(o => o.reportable).length} | streaks=${streaks.length} | streakProtectionEnabled=${streakProtection?.isProtectionOn ?? 'null'} | streakProtectionRemainingDays=${streakProtection?.remainingDays ?? 'null'} | streakCounter=${streakProtection?.streakCounter ?? 'null'} | level=${account.level} | account=${accountEmail ?? 'null'}`
+            `Snapshot complete | offers=${offers.length} | reportable=${offers.filter(o => o.reportable).length} | streaks=${streaks.length} | streakProtectionEnabled=${streakProtection?.isProtectionOn ?? 'null'} | streakProtectionRemainingDays=${streakProtection?.remainingDays ?? 'null'} | streakCounter=${dailyStreak ?? 'null'} | level=${account.level} | account=${accountEmail ?? 'null'}`
         )
 
         return {
             offers,
+            dailySet,
             reportable: offers.filter(o => o.reportable),
             streaks,
             streakProtection,
+            dailyStreak,
+            morePromotionsAvailable: combined.includes('Earn_LevelUpSection') || offers.some(o => !!o.hash),
             account
         }
+    }
+    private parseDailySet(combined: string): ParsedOffer[] | null {
+        const groups = this.extractObjects(combined, '"dailySetItems"')
+        const offers = new Map<string, ParsedOffer>()
+        let confirmed = false
+        for (const group of groups) {
+            if (!Array.isArray(group.dailySetItems)) continue
+            const expires = typeof group.expiresAt === 'string' ? group.expiresAt.replace(/^\$D/, '') : ''
+            const expiry = Date.parse(expires)
+            if (!Number.isFinite(expiry) || expiry <= Date.now() || expiry > Date.now() + 48 * 60 * 60_000) continue
+            if (
+                group.dailySetItems.some(
+                    item =>
+                        !item ||
+                        typeof item !== 'object' ||
+                        typeof item.isCompleted !== 'boolean' ||
+                        typeof item.offerId !== 'string' ||
+                        !item.offerId ||
+                        typeof item.points !== 'number' ||
+                        !Number.isFinite(item.points) ||
+                        item.points < 0 ||
+                        (this.normaliseDate(item.date) ?? '') > expires.slice(0, 10)
+                )
+            )
+                continue
+            confirmed = true
+            for (const offer of this.parseOffers(JSON.stringify(group.dailySetItems))) {
+                if (offer.date && offer.date > expires.slice(0, 10)) continue
+                offer.reportable = Boolean(offer.hash) && !offer.isCompleted && !offer.isLocked
+                offers.set(offer.offerId, offer)
+            }
+        }
+        return confirmed ? [...offers.values()] : null
     }
     public getStreakProtection(html: string): StreakProtectionState | null {
         return this.parseStreakProtection(this.concatFlightChunks(html))
@@ -174,12 +275,12 @@ export default class ReactFunc {
 
             for (const page of pages) {
                 let pageChunks = 0
-                const before = combined.length
+                let source = ''
 
                 for (const match of page.matchAll(pushRe)) {
                     try {
                         // Re-wrap in quotes so JSON.parse decodes
-                        combined += JSON.parse(`"${match[1]}"`)
+                        source += JSON.parse(`"${match[1]}"`)
                         count++
                         pageChunks++
                     } catch (err) {
@@ -191,8 +292,10 @@ export default class ReactFunc {
                     }
                 }
 
-                if (pageChunks > 0) combined += '\n'
-                perPage.push(`${pageChunks}c/${combined.length - before}b`)
+                // Flight record IDs are local to each response. Resolving after
+                // joining /earn and /dashboard lets one page overwrite the other.
+                if (pageChunks > 0) combined += this.resolveFlightReferences(source) + '\n'
+                perPage.push(`${pageChunks}c/${source.length}b`)
             }
 
             this.bot.logger.debug(
@@ -218,6 +321,51 @@ export default class ReactFunc {
             )
             return ''
         }
+    }
+
+    // Next Flight may store card fields in separate records (e.g. attributes: "$a").
+    // Resolve data references before scanning offers so hashes, points and activity types stay together.
+    private resolveFlightReferences(combined: string): string {
+        const records = new Map<string, unknown>()
+        const lines = combined.split('\n')
+        for (const line of lines) {
+            const match = line.match(/^([0-9a-f]+):(.*)$/i)
+            if (!match) continue
+            try {
+                records.set(match[1]!, JSON.parse(match[2]!))
+            } catch {}
+        }
+        let budget = 100_000
+        const resolve = (value: unknown, path: Set<string>, depth: number): unknown => {
+            if (--budget < 0 || depth > 30) return value
+            if (typeof value === 'string') {
+                const ref = value.match(/^\$(?:L)?([0-9a-f]+)(?::(.+))?$/i)
+                const id = ref?.[1]
+                if (!id || !records.has(id) || path.has(id)) return value
+                let target = records.get(id)
+                for (const key of ref?.[2]?.split(':') ?? []) {
+                    if (!target || typeof target !== 'object' || !Object.prototype.hasOwnProperty.call(target, key))
+                        return value
+                    target = (target as Record<string, unknown>)[key]
+                }
+                return resolve(target, new Set([...path, id]), depth + 1)
+            }
+            if (Array.isArray(value)) return value.map(item => resolve(item, path, depth + 1))
+            if (value && typeof value === 'object') {
+                return Object.fromEntries(
+                    Object.entries(value).map(([key, item]) => [key, resolve(item, path, depth + 1)])
+                )
+            }
+            return value
+        }
+        return lines
+            .map(line => {
+                const id = line.match(/^([0-9a-f]+):(?:\[|\{)/i)?.[1]
+                return id && records.has(id)
+                    ? `${id}:${JSON.stringify(resolve(records.get(id), new Set([id]), 0))}`
+                    : line
+            })
+            .join('\n')
     }
 
     // Find every object containing "anchor" and return them as parsed JSON
@@ -309,7 +457,8 @@ export default class ReactFunc {
 
                 const hash = (obj.hash as string | null) ?? null
                 const isCompleted = ((obj.isCompleted ?? obj.complete) as boolean | undefined) === true
-                const isLocked = (obj.isLocked as boolean | undefined) === true
+                const isLocked =
+                    obj.isLocked === true || obj.isDisabled === true || obj.exclusiveLockedFeatureStatus === 'locked'
                 const date = this.normaliseDate(obj.date as string | undefined)
                 const attributes =
                     obj.attributes && typeof obj.attributes === 'object'
@@ -329,14 +478,23 @@ export default class ReactFunc {
                 const candidate: ParsedOffer = {
                     offerId,
                     hash,
-                    title: (obj.title as string) ?? '',
+                    title: (obj.title as string) || (obj.ariaLabel as string) || (obj.linkText as string) || '',
                     description: (obj.description as string) ?? '',
-                    points: (obj.points as number) ?? (obj.pointProgressMax as number) ?? 0,
+                    points: (() => {
+                        const points = Number(obj.points ?? obj.pointProgressMax ?? 0)
+                        return Number.isFinite(points) && points >= 0 ? points : 0
+                    })(),
+                    pointProgress: pointValue(obj.pointProgress ?? attributes?.pointprogress),
                     promotionSubtype: (obj.promotionSubtype as string | null) ?? null,
-                    destination: (obj.destination as string) ?? (obj.destinationUrl as string) ?? '',
+                    promotionType: (obj.promotionType as string | null) ?? null,
+                    name: (obj.name as string | null) ?? null,
+                    destination:
+                        (obj.destination as string) || (obj.destinationUrl as string) || (obj.href as string) || '',
                     isCompleted,
                     isPromotional,
                     isLocked,
+                    isDisabled: obj.isDisabled === true,
+                    activityProgressMax: typeof obj.activityProgressMax === 'number' ? obj.activityProgressMax : null,
                     unlockCriteria: (obj.unlockCriteria as string | null) ?? null,
                     date,
                     activityType:
@@ -350,15 +508,20 @@ export default class ReactFunc {
                     continue
                 }
 
+                existing.pointProgress ??= candidate.pointProgress
                 existing.hash ??= candidate.hash
                 existing.title ||= candidate.title
                 existing.description ||= candidate.description
                 existing.points ||= candidate.points
+                existing.promotionType ??= candidate.promotionType
+                existing.name ??= candidate.name
                 existing.promotionSubtype ??= candidate.promotionSubtype
                 existing.destination ||= candidate.destination
                 existing.isCompleted ||= candidate.isCompleted
                 existing.isPromotional ||= candidate.isPromotional
                 existing.isLocked ||= candidate.isLocked
+                existing.isDisabled ||= candidate.isDisabled
+                existing.activityProgressMax ??= candidate.activityProgressMax
                 existing.unlockCriteria ??= candidate.unlockCriteria
                 existing.date ??= candidate.date
                 existing.activityType ??= candidate.activityType
@@ -395,18 +558,30 @@ export default class ReactFunc {
 
     private parseStreaks(combined: string): StreakState[] {
         try {
+            const resetTimes = new Map<string, string>()
+            for (const carrier of this.extractObjects(combined, '"expiresAt"')) {
+                const streak = carrier.streak as Record<string, unknown> | undefined
+                if (typeof streak?.partner !== 'string' || typeof carrier.expiresAt !== 'string') continue
+                const reset = Date.parse(carrier.expiresAt.replace(/^\$D/, ''))
+                if (Number.isFinite(reset)) resetTimes.set(streak.partner, new Date(reset).toISOString())
+            }
+            const count = (value: unknown): number => {
+                const n = pointValue(value)
+                return n !== null && Number.isSafeInteger(n) ? n : 0
+            }
             const streaks = this.extractObjects(combined, '"dailyPoints"')
                 .filter(o => typeof o.partner === 'string' && Array.isArray(o.dailyPoints))
                 .map<StreakState>(o => ({
                     partner: o.partner as string,
-                    activitiesCompleted: (o.activitiesCompleted as number) ?? 0,
-                    activitiesTotal: (o.activitiesTotal as number) ?? 0,
-                    completedDays: (o.completedDays as number) ?? 0,
-                    currentDay: (o.currentDay as number) ?? 0,
-                    totalDays: (o.totalDays as number) ?? 0,
+                    resetAt: resetTimes.get(o.partner as string) ?? null,
+                    activitiesCompleted: count(o.activitiesCompleted),
+                    activitiesTotal: count(o.activitiesTotal),
+                    completedDays: count(o.completedDays),
+                    currentDay: count(o.currentDay),
+                    totalDays: count(o.totalDays),
                     isCurrentDayCompleted: (o.isCurrentDayCompleted as boolean | undefined) === true,
                     isEnabled: (o.isEnabled as boolean | undefined) === true,
-                    dailyPoints: o.dailyPoints as number[],
+                    dailyPoints: (o.dailyPoints as unknown[]).map(count),
                     activationOfferId:
                         typeof o.activationOfferId === 'string' && o.activationOfferId !== '$undefined'
                             ? o.activationOfferId
@@ -426,7 +601,7 @@ export default class ReactFunc {
                 }))
 
             // de-dupe on partner
-            const byPartner = new Map(streaks.map(s => [s.partner, s]))
+            const byPartner = new Map(streaks.filter(s => !s.resetAt || Date.parse(s.resetAt) > Date.now()).map(s => [s.partner, s]))
             const unique = [...byPartner.values()]
 
             this.bot.logger.debug(
@@ -477,6 +652,20 @@ export default class ReactFunc {
             )
             return null
         }
+    }
+
+    private parseDailyStreak(combined: string): number | null {
+        // Daily streak is rendered separately from the protection switch.
+        // Keep zero distinct from an absent/malformed counter.
+        for (const obj of this.extractObjects(combined, '"streakCounter"')) {
+            if (
+                typeof obj.streakCounter === 'number' &&
+                Number.isSafeInteger(obj.streakCounter) &&
+                obj.streakCounter >= 0
+            )
+                return obj.streakCounter
+        }
+        return null
     }
 
     private parseAccountData(combined: string): AccountState {
@@ -698,32 +887,29 @@ export default class ReactFunc {
     }
 
     private parseQuestOffers(combined: string): QuestChild[] {
-        const out: QuestChild[] = []
-        const seen = new Set<string>()
-
-        for (const obj of this.extractObjects(combined, '"offerId"')) {
-            const offerId = obj.offerId as string | undefined
-            if (!offerId || !offerId.includes('pcchild') || seen.has(offerId)) continue
-            seen.add(offerId)
-
-            const hash = (obj.hash as string | null) ?? null
-            const points = (obj.points as number) ?? (obj.pointProgressMax as number) ?? 0
-            const isCompleted = ((obj.isCompleted ?? obj.complete) as boolean | undefined) === true
-            const isLocked = (obj.isLocked as boolean | undefined) === true
-            const isDisabled = (obj.isDisabled as boolean | undefined) === true
-
-            const reportable = !!hash && !isCompleted && !isLocked && !isDisabled
-
-            out.push({
-                offerId,
-                hash,
-                points,
-                isCompleted,
-                isLocked,
-                isDisabled,
-                reportable
-            })
+        const out = this.parseOffers(combined)
+            .filter(
+                offer =>
+                    !this.isParentQuestId(offer.offerId) &&
+                    (/pcchild/i.test(offer.offerId) || (!!offer.hash && !!offer.title))
+            )
+            .map(offer => ({ ...offer, isDisabled: offer.isDisabled === true }))
+        // The CTA props carry the signed offer; prerequisites and multi-day
+        // instructions live in the enclosing rendered step, not in those props.
+        const descriptions = new Map<string, string>()
+        for (const container of this.extractObjects(combined, '"className"')) {
+            const serialized = JSON.stringify(container.children)
+            if (!serialized || serialized.length > 30_000) continue
+            const ids = [...new Set([...serialized.matchAll(/"offerId":"([^"]+)"/g)].map(m => m[1]!))]
+            if (ids.length !== 1) continue
+            const child = out.find(item => item.offerId === ids[0])
+            if (!child) continue
+            const text = this.reactText(container.children).trim()
+            if (text.length <= (child.title?.length ?? 0) || text.length > 1500) continue
+            const prev = descriptions.get(child.offerId)
+            if (!prev || text.length < prev.length) descriptions.set(child.offerId, text)
         }
+        for (const child of out) child.description ||= descriptions.get(child.offerId) || ''
 
         this.bot.logger.debug(
             this.bot.isMobile,
@@ -736,7 +922,33 @@ export default class ReactFunc {
 
     public snapshotQuestList(...htmls: string[]): ParentQuest[] {
         try {
-            const combined = htmls.map(h => this.concatFlightChunks(h)).join('')
+            const combined = this.concatFlightChunks(htmls)
+
+            // Read each card's own resolved React subtree. A fixed-size slice
+            // around a URL can spill into the next card or omit a lazy child.
+            const cards = new Map<string, ParentQuest>()
+            for (const obj of this.extractObjects(combined, '"href"')) {
+                const id =
+                    typeof obj.href === 'string' ? obj.href.match(/^\/earn\/quest\/([A-Za-z0-9_-]+)$/)?.[1] : null
+                if (!id) continue
+                const text = this.reactText(obj.children)
+                const task = text.match(/(\d+)\s*\/\s*(\d+)\s*tasks/i)
+                const subtree = JSON.stringify(obj.children)
+                const title = subtree.match(/"alt":"((?:[^"\\]|\\.)*)"/)?.[1] ?? ''
+                const points = subtree.match(/"children":\["(?:\+)?","([\d,]+)"\]/)
+                const prev = cards.get(id)
+                cards.set(id, {
+                    offerId: id,
+                    title: title || prev?.title || '',
+                    pointProgressMax: points ? Number(points[1]!.replace(/,/g, '')) : (prev?.pointProgressMax ?? 0),
+                    complete: task
+                        ? Number(task[1]) >= Number(task[2]) && Number(task[2]) > 0
+                        : (prev?.complete ?? false),
+                    completedTasks: task ? Number(task[1]) : prev?.completedTasks,
+                    totalTasks: task ? Number(task[2]) : prev?.totalTasks
+                })
+            }
+            if (cards.size) return [...cards.values()]
 
             const anchors: { id: string; at: number }[] = []
             for (const match of combined.matchAll(/\/earn\/quest\/([A-Za-z0-9_]+)/g)) {
@@ -807,6 +1019,16 @@ export default class ReactFunc {
         }
     }
 
+    private reactText(value: unknown): string {
+        if (typeof value === 'string') return value.startsWith('$') ? '' : value
+        if (Array.isArray(value)) {
+            if (value[0] === '$') return this.reactText((value[3] as Record<string, unknown> | undefined)?.children)
+            return value.map(item => this.reactText(item)).join(' ')
+        }
+        if (value && typeof value === 'object') return this.reactText((value as Record<string, unknown>).children)
+        return ''
+    }
+
     // <campaign>_pcparent_<name>_punchcard
     private isParentQuestId(offerId: string): boolean {
         const id = offerId.toLowerCase()
@@ -822,6 +1044,8 @@ export default class ReactFunc {
 
     private normaliseDate(rawDate: string | undefined): string | null {
         if (!rawDate) return null
+        const iso = rawDate.match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/)
+        if (iso) return iso[1]!
         const m = rawDate.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
         if (!m) return null
         return `${m[3]}-${m[1]}-${m[2]}`

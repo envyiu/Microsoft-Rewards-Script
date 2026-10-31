@@ -2,9 +2,12 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { createGunzip, gzip } from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 
 import { ProcessManager } from './processManager.js'
+import { accountExecutions } from './execution.js'
+import { AccountIpChecker } from './accountIpChecker.js'
 import { buildExcludedAccountsEnv, buildSingleAccountEnv, loadAccounts, mergeAccountStats } from './accounts.js'
 import {
     accountWriteAvailable,
@@ -25,7 +28,17 @@ import {
 import { readSchedule, writeSchedule } from './scheduleStore.js'
 import { deleteStoredSessions, listStoredSessions } from './sessionStore.js'
 import { resolveRunCommand } from './runCommand.js'
-import { SmartScheduler } from './smartScheduler.js'
+import { SmartScheduler, deriveNetworkGroup } from './smartScheduler.js'
+import { ManualSessionManager } from './manualSessionManager.js'
+import { Hybrid } from './hybrid.js'
+import {
+    accountRefForEmail,
+    getAndroidSessions,
+    openAndroidSession,
+    openAndroidViewer,
+    stopAndroidSession,
+    deleteAndroidSession
+} from './androidSessions.js'
 import {
     log,
     parseArgs,
@@ -41,7 +54,15 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = getProjectRoot(__dirname)
 
-loadEnvFile(projectRoot)
+if (process.env.MRS_SKIP_ENV_FILE !== '1') loadEnvFile(projectRoot)
+const Controller = process.env.MRS_WORKER_MODE === '1'
+    ? (await import('../worker/agent.js')).WorkerAgent
+    : process.env.MRS_FLEET_ENABLED === '1' && process.env.MRS_NODE_ROLE === 'local'
+      ? (await import('./fleet.js')).Fleet : Hybrid
+const hybrid = new Controller({
+    projectRoot,
+    environment: process.env
+})
 
 const cliArgs = parseArgs(process.argv.slice(2), { boolean: ['help', 'h'] })
 
@@ -128,6 +149,7 @@ const ALLOW_ACCOUNT_WRITE = envBool('API_ALLOW_ACCOUNT_WRITE', false)
 const RUN_HISTORY = integerSetting('API_RUN_HISTORY', envStr('API_RUN_HISTORY'), 20)
 const DIAG_DIR = envStr('API_DIAGNOSTICS_DIR') ?? path.join(projectRoot, 'diagnostics')
 const SMART_SCHEDULE_FILE = envStr('SMART_SCHEDULE_FILE') ?? path.join(projectRoot, 'config', 'smart-schedule.json')
+const accountIpChecker = new AccountIpChecker()
 
 const { command, args } = resolveRunCommand({ projectRoot })
 
@@ -148,14 +170,107 @@ const smartScheduler = new SmartScheduler({
     args,
     stopTimeoutMs: STOP_TIMEOUT_MS,
     configFile: SMART_SCHEDULE_FILE,
-    onLog: entry => pm.ingestEntry(entry)
+    onLog: entry => pm.ingestEntry(entry),
+    ...hybrid.schedulerOptions()
+})
+
+function syncManualLock(accountIndex, active) {
+    if (hybrid.holds?.[accountIndex]) {
+        const hold = hybrid.holds[accountIndex]
+        smartScheduler.setManualLock(accountIndex, hold.scope === 'account' ? null : hold.group)
+        return
+    }
+    if (!active) {
+        smartScheduler.clearManualLock(accountIndex)
+        return
+    }
+    const account = loadAccounts().find(item => item.index === Number(accountIndex))
+    if (!account) return
+    smartScheduler.setManualLock(
+        account.index,
+        process.env.MRS_WORKER_MODE === '1' ? null : deriveNetworkGroup(account, smartScheduler.get().config.networkGroupOverride)
+    )
+}
+
+const manualSessionManager = new ManualSessionManager({
+    projectRoot,
+    stopTimeoutMs: STOP_TIMEOUT_MS,
+    onAccountChange: syncManualLock,
+    onLog: entry => {
+        const prefix = `manual ACCOUNT_${entry.manualSession.accountIndex} ${entry.manualSession.platform}`
+        pm.note(entry.level ?? 'info', `${prefix}: ${entry.raw ?? entry.message ?? ''}`)
+    }
+})
+
+function refreshManualLocks() {
+    for (const accountIndex of new Set(manualSessionManager.list().map(session => session.accountIndex))) {
+        syncManualLock(accountIndex, true)
+    }
+}
+
+function getSmartState() {
+    const smart = hybrid.decorateSmart({
+        ...smartScheduler.get(),
+        configuredAccounts: loadAccounts().map(({ index, email }) => ({ index, email })),
+        manualSessions: manualSessionManager.list()
+    })
+    smart.execution = accountExecutions(loadAccounts(), smart, pm.getStatus(), account =>
+        hybrid.metadata
+            ? hybrid.metadata(account)
+            : hybrid.role === 'local' && hybrid.remoteOwned(account)
+              ? { node: 'vps' }
+              : {}
+    )
+    return smart
+}
+
+hybrid.attach({
+    scheduler: smartScheduler,
+    pm,
+    manual: manualSessionManager,
+    status: getStatus,
+    permissions: { schedule: ALLOW_SCHEDULE_WRITE, accounts: ALLOW_ACCOUNT_WRITE, config: ALLOW_CONFIG_WRITE }
 })
 
 function getStatus() {
     const status = pm.getStatus()
-    const smart = smartScheduler.get()
+    const smart = getSmartState()
+    if (!status.alive) status.state = 'idle'
     if (status.state === 'idle' && smart.running.length) status.state = 'running'
-    return { ...status, smart }
+    if (status.state === 'idle' && Object.values(smart.execution).some(execution => execution.state === 'unknown'))
+        status.state = 'unknown'
+    return { ...status, smart, manualSessions: smart.manualSessions }
+}
+
+function publicAndroidSessions(rows) {
+    const accounts = new Map(loadAccounts().map(account => [accountRefForEmail(account.email), account]))
+    return (Array.isArray(rows) ? rows : []).map(row => {
+        const account = accounts.get(row.accountRef)
+        return {
+            accountIndex: account?.index ?? null,
+            email: account?.email ?? null,
+            worker: row.worker ?? null,
+            state: row.state ?? 'unknown',
+            viewer: row.viewer ?? 'closed',
+            provisioned: row.provisioned === true,
+            manualAccount: row.manualAccount === true,
+            profile: row.profile ?? null
+        }
+    })
+}
+
+function publicAndroidSession(session, account) {
+    const safe = publicAndroidSessions([session]).at(0) ?? {
+        accountIndex: account.index,
+        email: account.email,
+        worker: null,
+        state: 'unknown',
+        viewer: 'closed',
+        provisioned: false,
+        manualAccount: true,
+        profile: null
+    }
+    return { ...safe, accountIndex: account.index, email: account.email }
 }
 
 const startedAt = Date.now()
@@ -191,6 +306,7 @@ function toHistoryRecord(entry) {
             success: a.success,
             error: a.error,
             streakProtection: a.streakProtection ?? null,
+            rewardsStreak: a.rewardsStreak ?? null,
             edgeBrowsing: a.edgeBrowsing ?? null
         }))
     }
@@ -241,7 +357,8 @@ async function readJsonBody(req, limitBytes = 1_000_000) {
     return new Promise((resolve, reject) => {
         let size = 0
         const chunks = []
-        req.on('data', chunk => {
+        const input = req.headers['content-encoding'] === 'gzip' ? req.pipe(createGunzip()) : req
+        input.on('data', chunk => {
             size += chunk.length
             if (size > limitBytes) {
                 reject(Object.assign(new Error('Request body too large.'), { code: 'BODY_TOO_LARGE' }))
@@ -250,7 +367,7 @@ async function readJsonBody(req, limitBytes = 1_000_000) {
             }
             chunks.push(chunk)
         })
-        req.on('end', () => {
+        input.on('end', () => {
             const raw = Buffer.concat(chunks).toString('utf8').trim()
             if (!raw) return resolve({})
             try {
@@ -259,12 +376,13 @@ async function readJsonBody(req, limitBytes = 1_000_000) {
                 reject(Object.assign(new Error('Invalid JSON body.'), { code: 'BAD_JSON' }))
             }
         })
-        req.on('error', reject)
+        input.on('error', reject)
+        if (input !== req) req.on('error', reject)
     })
 }
 
-async function readJsonObject(req) {
-    const body = await readJsonBody(req)
+async function readJsonObject(req, limitBytes) {
+    const body = await readJsonBody(req, limitBytes)
     if (typeof body !== 'object' || body === null || Array.isArray(body)) {
         throw Object.assign(new Error('Body must be a JSON object.'), { code: 'BAD_REQUEST' })
     }
@@ -316,10 +434,12 @@ function handleEventStream(req, res, url) {
 
     const onLog = entry => sendEvent('log', entry, entry.id)
     const onStatus = status => sendEvent('status', { reason: status.reason, ...getStatus() })
-    const onSmart = smart => sendEvent('status', { reason: 'smart-schedule', ...getStatus(), smart })
+    const onSmart = () => sendEvent('status', { reason: 'smart-schedule', ...getStatus() })
+    const onManual = () => sendEvent('status', { reason: 'manual-session', ...getStatus() })
     pm.on('log', onLog)
     pm.on('status', onStatus)
     smartScheduler.on('change', onSmart)
+    manualSessionManager.on('change', onManual)
 
     const keepAlive = setInterval(() => write(': ping\n\n'), 15000)
     if (typeof keepAlive.unref === 'function') keepAlive.unref()
@@ -329,6 +449,7 @@ function handleEventStream(req, res, url) {
         pm.off('log', onLog)
         pm.off('status', onStatus)
         smartScheduler.off('change', onSmart)
+        manualSessionManager.off('change', onManual)
         if (!res.writableEnded) res.end()
     }
     req.on('close', cleanup)
@@ -361,6 +482,28 @@ const requestHandler = async (req, res) => {
     }
 
     try {
+        if (
+            await hybrid.handle(req, res, url, {
+                read: request =>
+                    readJsonObject(request, pathname.startsWith('/internal/hybrid/') ? 128 * 1024 * 1024 : 1_000_000),
+                send: (response, status, data) => {
+                    if (
+                        !pathname.startsWith('/internal/hybrid/') ||
+                        !String(req.headers['accept-encoding']).includes('gzip')
+                    )
+                        return sendJson(response, status, data)
+                    gzip(JSON.stringify(data), (error, buffer) => {
+                        if (error) return sendJson(response, 500, { error: 'Could not encode node response' })
+                        response.writeHead(status, {
+                            'Content-Type': 'application/json; charset=utf-8',
+                            'Content-Encoding': 'gzip'
+                        })
+                        response.end(buffer)
+                    })
+                }
+            })
+        )
+            return
         // index
         if (method === 'GET' && pathname === '/') {
             return sendJson(res, 200, {
@@ -377,6 +520,7 @@ const requestHandler = async (req, res) => {
                     'GET /errors',
                     'GET /history',
                     'GET /accounts',
+                    'POST /accounts/check-ip',
                     'POST /accounts/validate',
                     'POST /accounts',
                     'PATCH /accounts/:index',
@@ -389,6 +533,13 @@ const requestHandler = async (req, res) => {
                     'POST /config/sync',
                     'GET /schedule',
                     'GET /smart-schedule',
+                    'GET /manual-sessions',
+                    'POST /manual-sessions',
+                    'GET /android-sessions',
+                    'POST /android-sessions',
+                    'POST /android-sessions/:accountIndex/viewer',
+                    'POST /android-sessions/:accountIndex/stop',
+                    'DELETE /android-sessions/:accountIndex',
                     'POST /start',
                     'POST /stop',
                     'POST /restart',
@@ -397,7 +548,8 @@ const requestHandler = async (req, res) => {
                     'PUT|PATCH /config',
                     'PUT|PATCH /schedule',
                     'PUT /smart-schedule',
-                    'POST /smart-schedule/replan'
+                    'POST /smart-schedule/replan',
+                    'POST /smart-schedule/urgent'
                 ]
             })
         }
@@ -457,16 +609,57 @@ const requestHandler = async (req, res) => {
         }
 
         // account overview
+        const stopSmartAccount = pathname.match(/^\/smart-schedule\/accounts\/([1-9]\d*)\/stop$/)
+        if (method === 'POST' && stopSmartAccount) {
+            if (!ALLOW_SCHEDULE_WRITE) return sendJson(res, 403, { error: 'Schedule writes disabled.' })
+            const body = await readJsonObject(req)
+            try {
+                return sendJson(res, 200, await smartScheduler.stopAccount(Number(stopSmartAccount[1]), body.jobId))
+            } catch (error) {
+                return sendJson(res, error.status || 500, { error: error.message, code: error.code })
+            }
+        }
+
         if (method === 'GET' && pathname === '/accounts') {
+            const execution = getSmartState().execution
             const accounts = mergeAccountStats(loadAccounts(), pm.getHistory().map(toHistoryRecord))
             const safeAccounts = listManagedAccounts()
             const safeByIndex = new Map(safeAccounts.map(account => [account.index, account]))
-            const merged = accounts.map(account => ({ ...account, ...safeByIndex.get(account.index) }))
+            const merged = accounts.map(account => ({
+                ...account,
+                ...safeByIndex.get(account.index),
+                ipCheck: accountIpChecker.get(account.index),
+                execution: execution[account.index],
+                ...(hybrid.metadata
+                    ? hybrid.metadata(account)
+                    : hybrid.enabled
+                      ? {
+                            node: hybrid.remoteOwned(account) ? 'vps' : 'local',
+                            nodeOnline: hybrid.remoteOwned(account) ? hybrid.online : true
+                        }
+                      : {})
+            }))
             return sendJson(res, 200, {
                 accounts: merged,
                 count: merged.length,
                 writable: ALLOW_ACCOUNT_WRITE && accountWriteAvailable(projectRoot)
             })
+        }
+
+        if (method === 'POST' && pathname === '/accounts/check-ip') {
+            const body = await readJsonObject(req)
+            try {
+                const results = await accountIpChecker.check(body.accountIndexes ?? null)
+                return sendJson(res, 200, {
+                    results,
+                    count: results.length,
+                    succeeded: results.filter(result => result.ip !== null).length
+                })
+            } catch (error) {
+                return sendJson(res, error.code === 'BAD_REQUEST' ? 400 : 500, {
+                    error: error.code === 'BAD_REQUEST' ? error.message : 'IP check failed.'
+                })
+            }
         }
 
         if (method === 'POST' && pathname === '/accounts/validate') {
@@ -475,7 +668,10 @@ const requestHandler = async (req, res) => {
             try {
                 return sendJson(res, 200, previewAccounts(projectRoot, rawAccounts))
             } catch (err) {
-                return sendJson(res, err.code === 'DUPLICATE_ACCOUNT' ? 409 : 400, { error: err.message, code: err.code })
+                return sendJson(res, err.code === 'DUPLICATE_ACCOUNT' ? 409 : 400, {
+                    error: err.message,
+                    code: err.code
+                })
             }
         }
 
@@ -493,7 +689,11 @@ const requestHandler = async (req, res) => {
                 pm.note('info', `Added ${result.count} account configuration(s) via API.`)
                 return sendJson(res, 201, { ...result, writable: true })
             } catch (err) {
-                const status = ['DUPLICATE_ACCOUNT', 'ACCOUNT_WRITE_UNAVAILABLE', 'ACCOUNT_NOT_FOUND'].includes(err.code) ? 409 : 400
+                const status = ['DUPLICATE_ACCOUNT', 'ACCOUNT_WRITE_UNAVAILABLE', 'ACCOUNT_NOT_FOUND'].includes(
+                    err.code
+                )
+                    ? 409
+                    : 400
                 return sendJson(res, status, { error: err.message, code: err.code })
             }
         }
@@ -509,10 +709,13 @@ const requestHandler = async (req, res) => {
             try {
                 const result = updateAccount(projectRoot, Number(accountMatch[1]), body)
                 smartScheduler.replan()
+                if (manualSessionManager.hasAccount(Number(accountMatch[1])))
+                    syncManualLock(Number(accountMatch[1]), true)
                 pm.note('info', `Updated ACCOUNT_${accountMatch[1]} configuration via API.`)
                 return sendJson(res, 200, { ...result, writable: true })
             } catch (err) {
-                const status = err.code === 'ACCOUNT_NOT_FOUND' ? 404 : err.code === 'ACCOUNT_WRITE_UNAVAILABLE' ? 409 : 400
+                const status =
+                    err.code === 'ACCOUNT_NOT_FOUND' ? 404 : err.code === 'ACCOUNT_WRITE_UNAVAILABLE' ? 409 : 400
                 return sendJson(res, status, { error: err.message, code: err.code })
             }
         }
@@ -526,20 +729,28 @@ const requestHandler = async (req, res) => {
             const index = Number(accountMatch[1])
             const configured = loadAccounts()
             const target = configured.find(account => account.index === index)
-            if (!target) return sendJson(res, 404, { error: `ACCOUNT_${index} is not configured.`, code: 'ACCOUNT_NOT_FOUND' })
+            if (!target)
+                return sendJson(res, 404, { error: `ACCOUNT_${index} is not configured.`, code: 'ACCOUNT_NOT_FOUND' })
             if (configured.length <= 1) {
-                return sendJson(res, 409, { error: 'At least one account must remain configured.', code: 'LAST_ACCOUNT' })
+                return sendJson(res, 409, {
+                    error: 'At least one account must remain configured.',
+                    code: 'LAST_ACCOUNT'
+                })
             }
             const smartRunning = smartScheduler.get().running.some(job => job.accountIndex === index)
-            if (pm.getStatus().state !== 'idle' || smartRunning) {
-                return sendJson(res, 409, { error: 'Stop the active run before deleting this account.', code: 'RUN_ACTIVE' })
+            if (pm.getStatus().state !== 'idle' || smartRunning || manualSessionManager.hasAccount(index)) {
+                return sendJson(res, 409, {
+                    error: 'Stop the active run before deleting this account.',
+                    code: 'RUN_ACTIVE'
+                })
             }
             try {
                 const result = deleteAccount(projectRoot, index)
                 let sessions = null
                 try {
                     const loaded = loadConfigSafe(projectRoot)
-                    const sessionPath = typeof loaded?.data?.sessionPath === 'string' ? loaded.data.sessionPath : 'sessions'
+                    const sessionPath =
+                        typeof loaded?.data?.sessionPath === 'string' ? loaded.data.sessionPath : 'sessions'
                     sessions = deleteStoredSessions(projectRoot, sessionPath, target.email)
                 } catch (error) {
                     pm.note('warn', `Deleted ACCOUNT_${index} configuration but could not remove stored sessions.`)
@@ -549,7 +760,8 @@ const requestHandler = async (req, res) => {
                 pm.note('info', `Deleted ACCOUNT_${index} configuration and stored account sessions.`)
                 return sendJson(res, 200, { ...result, sessions, writable: true })
             } catch (err) {
-                const status = err.code === 'ACCOUNT_NOT_FOUND' ? 404 : err.code === 'ACCOUNT_WRITE_UNAVAILABLE' ? 409 : 400
+                const status =
+                    err.code === 'ACCOUNT_NOT_FOUND' ? 404 : err.code === 'ACCOUNT_WRITE_UNAVAILABLE' ? 409 : 400
                 return sendJson(res, status, { error: err.message, code: err.code })
             }
         }
@@ -676,38 +888,279 @@ const requestHandler = async (req, res) => {
         }
 
         if (method === 'GET' && pathname === '/smart-schedule') {
-            return sendJson(res, 200, { ...smartScheduler.get(), writable: ALLOW_SCHEDULE_WRITE })
+            return sendJson(res, 200, { ...getSmartState(), writable: ALLOW_SCHEDULE_WRITE })
+        }
+
+        if (method === 'GET' && pathname === '/manual-sessions') {
+            return sendJson(res, 200, { sessions: manualSessionManager.list() })
+        }
+
+        if (method === 'POST' && pathname === '/manual-sessions') {
+            const body = await readJsonObject(req)
+            const accountIndex = Number(body.accountIndex)
+            const platform = typeof body.platform === 'string' ? body.platform.toLowerCase() : ''
+            if (!Number.isSafeInteger(accountIndex) || accountIndex < 1 || !['desktop', 'mobile'].includes(platform)) {
+                return sendJson(res, 400, {
+                    error: 'accountIndex must be a positive integer and platform must be desktop or mobile.',
+                    code: 'BAD_REQUEST'
+                })
+            }
+            const account = loadAccounts().find(item => item.index === accountIndex)
+            if (!account)
+                return sendJson(res, 404, {
+                    error: `ACCOUNT_${accountIndex} is not configured.`,
+                    code: 'ACCOUNT_NOT_FOUND'
+                })
+            try {
+                const session = await manualSessionManager.open({ accountIndex, email: account.email, platform, preRewards: smartScheduler.isPreRewardsAccount(accountIndex) })
+                pm.note('info', `Opened manual ${platform} session for ACCOUNT_${accountIndex}.`)
+                return sendJson(res, 202, { opened: true, session })
+            } catch (error) {
+                const status =
+                    error.code === 'BAD_REQUEST'
+                        ? 400
+                        : error.code === 'START_TIMEOUT'
+                          ? 504
+                          : error.code === 'START_FAILED'
+                            ? 502
+                            : 500
+                return sendJson(res, status, { error: error.message, code: error.code })
+            }
+        }
+
+        const closeManualSessionMatch = pathname.match(/^\/manual-sessions\/(\d+)\/close$/)
+        if (method === 'POST' && closeManualSessionMatch) {
+            const accountIndex = Number(closeManualSessionMatch[1])
+            const body = await readJsonObject(req)
+            const platform = typeof body.platform === 'string' ? body.platform.toLowerCase() : ''
+            if (!Number.isSafeInteger(accountIndex) || accountIndex < 1 || !['desktop', 'mobile'].includes(platform)) {
+                return sendJson(res, 400, {
+                    error: 'A positive account index and platform desktop or mobile are required.',
+                    code: 'BAD_REQUEST'
+                })
+            }
+            const account = loadAccounts().find(item => item.index === accountIndex)
+            if (!account) {
+                return sendJson(res, 404, {
+                    error: `ACCOUNT_${accountIndex} is not configured.`,
+                    code: 'ACCOUNT_NOT_FOUND'
+                })
+            }
+            try {
+                const closed = await manualSessionManager.closeForAccount({ accountIndex, platform })
+                pm.note('info', `Closed ${closed} manual ${platform} browser session(s) for ACCOUNT_${accountIndex}.`)
+                return sendJson(res, 200, { closed, accountIndex, platform })
+            } catch (error) {
+                return sendJson(res, 500, { error: error.message, code: error.code ?? 'CLOSE_FAILED' })
+            }
+        }
+
+        if (method === 'GET' && pathname === '/android-sessions') {
+            try {
+                const state = await getAndroidSessions()
+                return sendJson(res, 200, { sessions: publicAndroidSessions(state.sessions) })
+            } catch (error) {
+                const status = [
+                    'BRIDGE_UNAVAILABLE',
+                    'BRIDGE_TIMEOUT',
+                    'DAMRU_NOT_READY',
+                    'SCRCPY_UNAVAILABLE'
+                ].includes(error.code)
+                    ? 503
+                    : 502
+                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
+            }
+        }
+
+        if (method === 'POST' && pathname === '/android-sessions') {
+            const body = await readJsonObject(req)
+            const accountIndex = Number(body.accountIndex)
+            if (!Number.isSafeInteger(accountIndex) || accountIndex < 1) {
+                return sendJson(res, 400, { error: 'accountIndex must be a positive integer.', code: 'BAD_REQUEST' })
+            }
+            const account = loadAccounts().find(item => item.index === accountIndex)
+            if (!account)
+                return sendJson(res, 404, {
+                    error: `ACCOUNT_${accountIndex} is not configured.`,
+                    code: 'ACCOUNT_NOT_FOUND'
+                })
+            try {
+                const session = await openAndroidSession({ accountIndex, email: account.email })
+                return sendJson(res, 202, { opened: true, session: publicAndroidSession(session, account) })
+            } catch (error) {
+                const status = ['INVALID_PROXY_CONFIG', 'NO_WORKER_AVAILABLE', 'NO_PROFILE_AVAILABLE'].includes(
+                    error.code
+                )
+                    ? 409
+                    : ['BRIDGE_UNAVAILABLE', 'BRIDGE_TIMEOUT', 'DAMRU_NOT_READY', 'SCRCPY_UNAVAILABLE'].includes(
+                            error.code
+                        )
+                      ? 503
+                      : 502
+                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
+            }
+        }
+
+        const androidDeleteMatch = /^\/android-sessions\/([1-9]\d*)$/.exec(pathname)
+        if (method === 'DELETE' && androidDeleteMatch) {
+            const accountIndex = Number(androidDeleteMatch[1])
+            const account = loadAccounts().find(item => item.index === accountIndex)
+            if (!account)
+                return sendJson(res, 404, {
+                    error: `ACCOUNT_${accountIndex} is not configured.`,
+                    code: 'ACCOUNT_NOT_FOUND'
+                })
+            const body = await readJsonObject(req)
+            if (
+                !Number.isInteger(body.worker) ||
+                body.worker < 0 ||
+                body.worker > 49 ||
+                body.confirmation !== `DELETE ${body.worker}`
+            ) {
+                return sendJson(res, 400, {
+                    error: 'An expected worker index (0–49) and matching DELETE confirmation are required.',
+                    code: 'BAD_REQUEST'
+                })
+            }
+            if (pm.getStatus().state !== 'idle' || smartScheduler.get().running.length) {
+                return sendJson(res, 409, {
+                    error: 'Stop the active bot run before deleting an Android device.',
+                    code: 'RUN_ACTIVE'
+                })
+            }
+            try {
+                const result = await deleteAndroidSession({
+                    accountIndex,
+                    email: account.email,
+                    worker: body.worker,
+                    confirmation: body.confirmation
+                })
+                return sendJson(res, 200, {
+                    deleted: result.deleted === true,
+                    accountIndex,
+                    worker: result.worker ?? null
+                })
+            } catch (error) {
+                const status = ['WORKER_CHANGED', 'WORKER_BUSY'].includes(error.code)
+                    ? 409
+                    : ['BRIDGE_UNAVAILABLE', 'BRIDGE_TIMEOUT', 'DAMRU_NOT_READY'].includes(error.code)
+                      ? 503
+                      : 502
+                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
+            }
+        }
+
+        const androidStopMatch = /^\/android-sessions\/([1-9]\d*)\/stop$/.exec(pathname)
+        const androidViewerMatch = /^\/android-sessions\/([1-9]\d*)\/viewer$/.exec(pathname)
+        if (method === 'POST' && androidViewerMatch) {
+            const accountIndex = Number(androidViewerMatch[1])
+            const account = loadAccounts().find(item => item.index === accountIndex)
+            if (!account)
+                return sendJson(res, 404, {
+                    error: `ACCOUNT_${accountIndex} is not configured.`,
+                    code: 'ACCOUNT_NOT_FOUND'
+                })
+            try {
+                const session = await openAndroidViewer({ accountIndex, email: account.email })
+                return sendJson(res, 202, { opened: true, session: publicAndroidSession(session, account) })
+            } catch (error) {
+                const status = [
+                    'BRIDGE_UNAVAILABLE',
+                    'BRIDGE_TIMEOUT',
+                    'DAMRU_NOT_READY',
+                    'SCRCPY_UNAVAILABLE'
+                ].includes(error.code)
+                    ? 503
+                    : 502
+                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
+            }
+        }
+
+        if (method === 'POST' && androidStopMatch) {
+            const accountIndex = Number(androidStopMatch[1])
+            const account = loadAccounts().find(item => item.index === accountIndex)
+            if (!account)
+                return sendJson(res, 404, {
+                    error: `ACCOUNT_${accountIndex} is not configured.`,
+                    code: 'ACCOUNT_NOT_FOUND'
+                })
+            try {
+                const session = await stopAndroidSession({ accountIndex, email: account.email })
+                return sendJson(res, 202, { stopping: true, session: publicAndroidSession(session, account) })
+            } catch (error) {
+                const status = [
+                    'BRIDGE_UNAVAILABLE',
+                    'BRIDGE_TIMEOUT',
+                    'DAMRU_NOT_READY',
+                    'SCRCPY_UNAVAILABLE'
+                ].includes(error.code)
+                    ? 503
+                    : 502
+                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
+            }
         }
 
         if (method === 'PUT' && pathname === '/smart-schedule') {
             if (!ALLOW_SCHEDULE_WRITE) {
-                return sendJson(res, 403, { error: 'Schedule writes are disabled. Set API_ALLOW_SCHEDULE_WRITE=true to enable.' })
+                return sendJson(res, 403, {
+                    error: 'Schedule writes are disabled. Set API_ALLOW_SCHEDULE_WRITE=true to enable.'
+                })
             }
             const body = await readJsonObject(req)
             try {
                 if (body.enabled === true && pm.getStatus().state !== 'idle') {
-                    return sendJson(res, 409, { error: 'Stop the active legacy run before enabling Smart Scheduler.', code: 'RUN_ACTIVE' })
+                    return sendJson(res, 409, {
+                        error: 'Stop the active legacy run before enabling Smart Scheduler.',
+                        code: 'RUN_ACTIVE'
+                    })
                 }
                 const updated = smartScheduler.update(body)
+                refreshManualLocks()
                 if (updated.config.enabled) {
                     const current = readSchedule(projectRoot)
                     if (current.enabled) writeSchedule(projectRoot, { enabled: false })
                 }
                 pm.note('info', `Smart schedule ${updated.config.enabled ? 'enabled' : 'disabled'} via API.`)
-                return sendJson(res, 200, { ...updated, writable: true })
+                return sendJson(res, 200, { ...getSmartState(), writable: true })
             } catch (err) {
                 return sendJson(res, err.code === 'BAD_REQUEST' ? 400 : 500, { error: err.message, code: err.code })
             }
+        }
+
+        if (method === 'POST' && pathname === '/smart-schedule/urgent') {
+            if (!ALLOW_SCHEDULE_WRITE) return sendJson(res, 403, { error: 'Schedule writes are disabled.' })
+            const body = await readJsonObject(req)
+            if (typeof body.enabled !== 'boolean')
+                return sendJson(res, 400, { error: 'enabled must be a boolean.', code: 'BAD_REQUEST' })
+            if (body.enabled && pm.getStatus().state !== 'idle')
+                return sendJson(res, 409, { error: 'Stop the active legacy run first.', code: 'RUN_ACTIVE' })
+            refreshManualLocks()
+            const updated = smartScheduler.setUrgent(body.enabled)
+            if (updated.effectiveEnabled) {
+                const current = readSchedule(projectRoot)
+                if (current.enabled) writeSchedule(projectRoot, { enabled: false })
+            }
+            refreshManualLocks()
+            pm.note('info', `Urgent scheduling ${body.enabled ? 'requested' : 'cancelled'} via API.`)
+            return sendJson(res, 200, { ...getSmartState(), writable: true })
         }
 
         if (method === 'POST' && pathname === '/smart-schedule/replan') {
             const body = await readJsonObject(req)
             try {
                 const accountIndexes = body.accountIndexes == null ? null : body.accountIndexes
-                if (accountIndexes != null && (!Array.isArray(accountIndexes) || accountIndexes.some(v => !Number.isSafeInteger(Number(v)) || Number(v) < 1))) {
-                    return sendJson(res, 400, { error: 'accountIndexes must contain positive integers.', code: 'BAD_REQUEST' })
+                if (
+                    accountIndexes != null &&
+                    (!Array.isArray(accountIndexes) ||
+                        accountIndexes.some(v => !Number.isSafeInteger(Number(v)) || Number(v) < 1))
+                ) {
+                    return sendJson(res, 400, {
+                        error: 'accountIndexes must contain positive integers.',
+                        code: 'BAD_REQUEST'
+                    })
                 }
-                return sendJson(res, 200, smartScheduler.replan({ accountIndexes }))
+                smartScheduler.replan({ accountIndexes })
+                return sendJson(res, 200, getSmartState())
             } catch (err) {
                 return sendJson(res, err.code === 'BAD_REQUEST' ? 400 : 500, { error: err.message, code: err.code })
             }
@@ -721,8 +1174,11 @@ const requestHandler = async (req, res) => {
                 })
             }
             const body = await readJsonBody(req)
-            if (body?.enabled && smartScheduler.get().config.enabled) {
-                return sendJson(res, 409, { error: 'Disable Smart Scheduler before enabling cron.', code: 'SMART_SCHEDULE_ACTIVE' })
+            if (body?.enabled && smartScheduler.get().effectiveEnabled) {
+                return sendJson(res, 409, {
+                    error: 'Disable Smart Scheduler before enabling cron.',
+                    code: 'SMART_SCHEDULE_ACTIVE'
+                })
             }
             if (typeof body !== 'object' || body === null || Array.isArray(body)) {
                 return sendJson(res, 400, { error: 'Body must be a JSON object.' })
@@ -748,13 +1204,28 @@ const requestHandler = async (req, res) => {
         // start
         if (method === 'POST' && pathname === '/start') {
             const body = await readJsonObject(req)
-            if (smartScheduler.get().config.enabled) {
+            if (smartScheduler.get().effectiveEnabled) {
                 if (body.args != null || body.env != null || body.excludedAccountIndexes != null) {
-                    return sendJson(res, 400, { error: 'Smart mode does not accept args, env, or excludedAccountIndexes.', code: 'BAD_REQUEST' })
+                    return sendJson(res, 400, {
+                        error: 'Smart mode does not accept args, env, or excludedAccountIndexes.',
+                        code: 'BAD_REQUEST'
+                    })
                 }
                 const indexes = body.accountIndex == null ? null : [Number(body.accountIndex)]
                 const smart = smartScheduler.trigger(indexes, { force: true })
                 return sendJson(res, 202, { started: true, smart: true, queue: smart.queue, running: smart.running })
+            }
+            if (smartScheduler.get().running.length) {
+                return sendJson(res, 409, {
+                    error: 'Wait for active Smart Scheduler sessions to stop before starting a legacy run.',
+                    code: 'SMART_RUN_ACTIVE'
+                })
+            }
+            if (manualSessionManager.list().length) {
+                return sendJson(res, 409, {
+                    error: 'Close all manual browser sessions before starting a legacy run.',
+                    code: 'MANUAL_SESSION_ACTIVE'
+                })
             }
             const overrides = {}
             let selectedAccount = null
@@ -800,7 +1271,8 @@ const requestHandler = async (req, res) => {
             try {
                 if (smartScheduler.get().running.length) {
                     void smartScheduler.stop()
-                    if (pm.getStatus().state === 'idle') return sendJson(res, 202, { stopping: true, force, smart: true })
+                    if (pm.getStatus().state === 'idle')
+                        return sendJson(res, 202, { stopping: true, force, smart: true })
                 }
                 const stopping = pm.stop({ force })
                 stopping.catch(() => {})
@@ -814,14 +1286,29 @@ const requestHandler = async (req, res) => {
         // restart
         if (method === 'POST' && pathname === '/restart') {
             const body = await readJsonObject(req)
-            if (smartScheduler.get().config.enabled) {
+            if (smartScheduler.get().effectiveEnabled) {
                 if (body.args != null || body.env != null || body.excludedAccountIndexes != null) {
-                    return sendJson(res, 400, { error: 'Smart mode does not accept args, env, or excludedAccountIndexes.', code: 'BAD_REQUEST' })
+                    return sendJson(res, 400, {
+                        error: 'Smart mode does not accept args, env, or excludedAccountIndexes.',
+                        code: 'BAD_REQUEST'
+                    })
                 }
                 if (smartScheduler.get().running.length) await smartScheduler.stop()
                 const indexes = body.accountIndex == null ? null : [Number(body.accountIndex)]
                 const smart = smartScheduler.trigger(indexes, { force: true })
                 return sendJson(res, 202, { restarted: true, smart: true, queue: smart.queue, running: smart.running })
+            }
+            if (smartScheduler.get().running.length) {
+                return sendJson(res, 409, {
+                    error: 'Wait for active Smart Scheduler sessions to stop before restarting in legacy mode.',
+                    code: 'SMART_RUN_ACTIVE'
+                })
+            }
+            if (manualSessionManager.list().length) {
+                return sendJson(res, 409, {
+                    error: 'Close all manual browser sessions before restarting in legacy mode.',
+                    code: 'MANUAL_SESSION_ACTIVE'
+                })
             }
             const overrides = { force: readForce(body) }
             let selectedAccount = null
@@ -1038,6 +1525,7 @@ let shuttingDown = false
 async function shutdown(signal, { force = false } = {}) {
     if (shuttingDown) return
     shuttingDown = true
+    clearInterval(hybrid.timer)
     log('INFO', `${signal} received - shutting down.`)
     server.close()
     try {
@@ -1048,6 +1536,10 @@ async function shutdown(signal, { force = false } = {}) {
         if (pm.getStatus().state !== 'idle') {
             log('INFO', `Stopping active bot run${force ? ' (force)' : ''}…`)
             await pm.stop({ force })
+        }
+        if (manualSessionManager.list().length) {
+            log('INFO', 'Stopping manual browser sessions…')
+            await manualSessionManager.stopAll({ force })
         }
     } catch {
         // ignore

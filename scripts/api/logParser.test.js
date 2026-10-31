@@ -14,6 +14,25 @@ function apply(state, raw, receivedAt) {
     return entry
 }
 
+test('structured daily streak observations are independent, monotonic, and keep zero', () => {
+    const state = createRunState()
+    const value = { version: 1, email: 'fixture@example.test', dailyCounter: 0, status: 'fresh',
+        source: 'rewards-page', observedAt: '2026-10-27T10:00:00.000Z', partners: [] }
+    apply(state, line('fixture', 'REWARDS-STREAK', JSON.stringify(value)))
+    assert.equal(state.accounts[value.email].rewardsStreak.dailyCounter, 0)
+    apply(state, line('fixture', 'REWARDS-STREAK', JSON.stringify({ ...value, observedAt: '2026-10-26T10:00:00.000Z', dailyCounter: 99 })))
+    assert.equal(state.accounts[value.email].rewardsStreak.dailyCounter, 0)
+    apply(state, line('fixture', 'REWARDS-STREAK', JSON.stringify({ ...value, status: 'unknown', dailyCounter: null })))
+    assert.equal(state.accounts[value.email].rewardsStreak.status, 'fresh')
+})
+
+test('quota-only sessions are visible through the existing session log contract', () => {
+    const state = createRunState()
+    apply(state, line('main', 'SMART-SESSION', 'Session start | jobId=check-14 | type=quota'))
+    assert.equal(state.smartSession.type, 'quota')
+    assert.equal(state.smartSession.jobId, 'check-14')
+})
+
 test('parses the logger envelope and strips ANSI formatting', () => {
     const entry = parseLogLine(
         `\u001b[32m${line('account.n', 'LOGIN', 'Starting login process', 'INFO', 'MOBILE')}\u001b[39m`
@@ -447,4 +466,12 @@ test('marks Edge browsing partial when the local maximum ends before Microsoft r
     assert.equal(finished.status, 'partial')
     assert.equal(finished.reportsCompleted, 6)
     assert.equal(finished.reportsTotal, 6)
+})
+
+test('verified completion with unknown offer credit updates balance without inventing earned points', () => {
+    const state = createRunState()
+    apply(state, line('fixture', 'ACCOUNT-START', 'Starting account: fixture@example.test | geoLocale: VN | locale: en-US'))
+    apply(state, line('fixture', 'URL-REWARD', 'Completed UrlReward | offerId=test | pointsGained=unknown | currentBalance=105 | completionVerified=true | creditVerified=false'))
+    assert.equal(state.accounts['fixture@example.test'].live.balance, 105)
+    assert.equal(state.accounts['fixture@example.test'].live.gained, 0)
 })

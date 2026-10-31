@@ -144,6 +144,7 @@ export function loadAccounts(): Account[] {
                 password,
                 totpSecret: envStr(`ACCOUNT_${index}_TOTP_SECRET`),
                 recoveryEmail: envStr(`ACCOUNT_${index}_RECOVERY_EMAIL`) ?? '',
+                newAccountMode: envStr(`ACCOUNT_${index}_NEW_ACCOUNT_MODE`) === 'true',
                 geoLocale: envStr(`ACCOUNT_${index}_GEO_LOCALE`) ?? 'auto',
                 langCode: envStr(`ACCOUNT_${index}_LANG_CODE`) ?? 'en',
                 proxy: buildProxy(index),
@@ -169,7 +170,7 @@ export function loadConfig(): Config {
         }
 
         // Check root -> dist -> src (not in dist, but root)
-        const configPath = resolveProjectFile('config.json')
+        const configPath = process.env.MRS_CONFIG_FILE || resolveProjectFile('config.json')
         if (!configPath) {
             throw new Error(
                 'config.json not found - place it in the project root (dist/ and src/ are also searched as fallbacks)'

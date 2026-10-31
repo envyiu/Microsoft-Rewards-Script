@@ -172,7 +172,7 @@ export default class BrowserUtils {
 
                 const newTabPromises = Array.from({ length: tabsNeeded }, async () => {
                     try {
-                        const newPage = await browser.newPage()
+                        const newPage = await this.bot.newBrowserPage(browser)
                         await newPage.goto(REWARDS_BASE_URL, { waitUntil: 'domcontentloaded', timeout: 15000 })
                         return newPage
                     } catch (error) {
@@ -202,6 +202,10 @@ export default class BrowserUtils {
 
     async ghostClick(page: Page, selector: string, options?: ClickOptions): Promise<boolean> {
         try {
+            if (this.bot.executionPlan?.urgent) {
+                await page.locator(selector).first().click(options)
+                return true
+            }
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'GHOST-CLICK',

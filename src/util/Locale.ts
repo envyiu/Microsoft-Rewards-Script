@@ -1,5 +1,3 @@
-import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
-
 import type { Account } from '../interface/Account'
 
 export interface AccountLocale {
@@ -45,23 +43,5 @@ export function resolveAccountLocale(account: LocaleAccount, resolvedCountry?: s
         locale,
         acceptedLocales,
         acceptLanguage
-    }
-}
-
-export function fingerprintMatchesLocale(fingerprint: BrowserFingerprintWithHeaders, expected: AccountLocale): boolean {
-    try {
-        const navigatorLocale = normalizeLanguageTag(fingerprint.fingerprint.navigator.language)
-        const acceptLanguageEntry = Object.entries(fingerprint.headers).find(
-            ([name]) => name.toLowerCase() === 'accept-language'
-        )
-        const headerLocale = acceptLanguageEntry?.[1]?.split(',')[0]?.trim()
-
-        return (
-            navigatorLocale.toLowerCase() === expected.locale.toLowerCase() &&
-            Boolean(headerLocale) &&
-            normalizeLanguageTag(headerLocale!).toLowerCase() === expected.locale.toLowerCase()
-        )
-    } catch {
-        return false
     }
 }

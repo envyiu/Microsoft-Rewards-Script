@@ -1,13 +1,10 @@
-/* global window */
-
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { FingerprintGenerator } from 'fingerprint-generator'
-import { newInjectedContext } from 'fingerprint-injector'
 import ms from 'ms'
 import { chromium } from 'patchright'
+import browserIdentity from '../../common/browserIdentity.cjs'
 
 import {
     buildProxyConfig,
@@ -48,7 +45,6 @@ const BROWSER_ARGS = [
     '--mute-audio',
     '--no-first-run',
     '--no-default-browser-check',
-    '--disable-blink-features=AutomationControlled',
     '--disable-save-password-bubble',
     '--disable-dev-shm-usage',
     '--disable-background-networking',
@@ -170,34 +166,10 @@ function resolveLocale(account, resolvedCountry) {
     const locale = country ? new Intl.Locale(languageTag, { region: country }).toString() : parsed.toString()
     const acceptedLocales = locale.toLowerCase() === language ? [language] : [locale, language]
 
-    return { locale, acceptedLocales }
-}
-
-function fingerprintMatchesLocale(fingerprint, locale) {
-    try {
-        const navigatorLocale = new Intl.Locale(fingerprint.fingerprint.navigator.language).toString()
-        const acceptLanguage = Object.entries(fingerprint.headers).find(
-            ([name]) => name.toLowerCase() === 'accept-language'
-        )?.[1]
-        const headerLocale = acceptLanguage?.split(',')[0]?.trim()
-
-        return (
-            navigatorLocale.toLowerCase() === locale.locale.toLowerCase() &&
-            new Intl.Locale(headerLocale).toString().toLowerCase() === locale.locale.toLowerCase()
-        )
-    } catch {
-        return false
-    }
-}
-
-function createFingerprint(isMobile, locale) {
-    const hostOs = process.platform === 'darwin' ? 'macos' : process.platform === 'linux' ? 'linux' : 'windows'
-    return new FingerprintGenerator().getFingerprint({
-        devices: isMobile ? ['mobile'] : ['desktop'],
-        operatingSystems: isMobile ? ['android'] : [hostOs],
-        browsers: [{ name: 'edge' }],
-        locales: locale.acceptedLocales
-    })
+    const acceptLanguage = acceptedLocales
+        .map((acceptedLocale, index) => (index === 0 ? acceptedLocale : `${acceptedLocale};q=${1 - index * 0.1}`))
+        .join(',')
+    return { locale, acceptedLocales, acceptLanguage }
 }
 
 function loadStoredSession(dbPath, email, platform, fresh) {
@@ -280,11 +252,8 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
     const stored = loadStoredSession(dbPath, account.email, platform, fresh)
     const locale = resolveLocale(account, stored.resolvedCountry)
     const savesFingerprint = isMobile ? account.saveFingerprint.mobile : account.saveFingerprint.desktop
-    const canReuseFingerprint =
-        savesFingerprint && stored.fingerprint && fingerprintMatchesLocale(stored.fingerprint, locale)
-    const fingerprint = canReuseFingerprint ? stored.fingerprint : createFingerprint(isMobile, locale)
-    const screen = fingerprint.fingerprint.screen
-    const proxy = buildProxyConfig(account)
+    const proxyLease = await buildProxyConfig(account)
+    const proxy = proxyLease?.proxy ?? null
 
     if (account.proxy.url && !proxy) {
         throw new Error('Account proxy is configured but invalid (needs proxy URL and port)')
@@ -311,12 +280,39 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
     const certArgs = ignoreCertificateErrors
         ? ['--ignore-certificate-errors', '--ignore-certificate-errors-spki-list', '--ignore-ssl-errors']
         : []
+    const proxyPrivacyArgs = proxy ? ['--force-webrtc-ip-handling-policy=disable_non_proxied_udp'] : []
 
-    const browser = await chromium.launch({
-        headless: false,
-        ...(proxy ? { proxy } : {}),
-        args: [...BROWSER_ARGS, ...sandboxArgs, ...certArgs]
-    })
+    let browser
+    try {
+        browser = await chromium.launch({
+            headless: false,
+            ...(proxy ? { proxy } : {}),
+            args: [...BROWSER_ARGS, ...sandboxArgs, ...certArgs, ...proxyPrivacyArgs]
+        })
+    } catch (error) {
+        await proxyLease?.close()
+        throw error
+    }
+    browser.once('disconnected', () => void proxyLease?.close())
+
+    const nativeIdentity = await browserIdentity.captureNativeBrowserIdentity(browser, locale)
+    const prepared = isMobile
+        ? browserIdentity.prepareMobileIdentity({
+              storedIdentity: savesFingerprint ? stored.fingerprint : null,
+              nativeIdentity,
+              browserVersion: browser.version(),
+              accountKey: account.email,
+              locale: locale.locale,
+              acceptedLocales: locale.acceptedLocales,
+              acceptLanguage: locale.acceptLanguage
+          })
+        : { identity: nativeIdentity, action: 'native', reason: 'runtime-probe', profileId: null }
+    const fingerprint = prepared.identity
+    log(
+        'INFO',
+        `Chromium ${browser.version()} | identity=${prepared.action}:${prepared.reason}` +
+            (prepared.profileId ? ` | profile=${prepared.profileId}` : '')
+    )
 
     let interrupted = false
     const stop = async signal => {
@@ -331,35 +327,18 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
     process.once('SIGTERM', onSigTerm)
 
     try {
-        const injected = await newInjectedContext(browser, {
-            fingerprint,
-            newContextOptions: {
-                permissions: [],
-                ignoreHTTPSErrors: ignoreCertificateErrors,
-                ...(stored.storageState ? { storageState: stored.storageState } : {}),
-                ...(isMobile
-                    ? {
-                          isMobile: true,
-                          hasTouch: true,
-                          deviceScaleFactor: screen.devicePixelRatio,
-                          viewport: { width: screen.width, height: screen.height },
-                          screen: { width: screen.width, height: screen.height }
-                      }
-                    : {})
-            }
+        const context = await browser.newContext({
+            permissions: [],
+            ignoreHTTPSErrors: ignoreCertificateErrors,
+            ...(stored.storageState ? { storageState: stored.storageState } : {}),
+            ...browserIdentity.contextOptions(fingerprint, locale.locale)
         })
-        const context = injected
+        browserIdentity.registerContextIdentity(context, fingerprint, error => {
+            log('WARN', `Could not apply browser identity to a new page: ${error?.message ?? error}`)
+        })
         context.setDefaultTimeout(globalTimeout)
 
-        if (proxy) {
-            await context.addInitScript(() => {
-                delete window.RTCPeerConnection
-                delete window.webkitRTCPeerConnection
-                delete window.RTCDataChannel
-            })
-        }
-
-        const page = await context.newPage()
+        const page = await browserIdentity.newIdentityPage(context)
         await page.goto(REWARDS_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: globalTimeout }).catch(error => {
             log('WARN', `Initial Rewards navigation did not finish cleanly: ${error.message}`)
         })
@@ -382,6 +361,7 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
         process.removeListener('SIGINT', onSigInt)
         process.removeListener('SIGTERM', onSigTerm)
         await browser.close().catch(() => {})
+        await proxyLease?.close()
     }
 }
 

@@ -1,11 +1,41 @@
+import { waitForActivity } from '../../../util/ActivityTiming'
 import { URLs } from '../../../constants/urls'
 import { BING_APP_USER_AGENT } from '../../../constants/userAgents'
-import type { HttpRequestConfig } from '../../../util/Http'
 import { randomBytes } from 'crypto'
 import { BaseActivity } from '../BaseActivity'
 
+export interface ReadToEarnState {
+    offered: boolean
+    max: number
+    progress: number
+    remaining: number
+    balance: number | null
+}
+function record(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' ? (value as Record<string, unknown>) : null
+}
+function counter(value: unknown): number | null {
+    if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) return null
+    const number = Number(value)
+    return Number.isFinite(number) && number >= 0 ? number : null
+}
+export function parseReadToEarnState(data: unknown): ReadToEarnState | null {
+    const response = record(record(data)?.response)
+    if (!response || !Array.isArray(response.promotions)) return null
+    const promotion = response.promotions
+        .map(record)
+        .find(p => record(p?.attributes)?.offerid === 'ENUS_readarticle3_30points')
+    if (!promotion) return { offered: false, max: 0, progress: 0, remaining: 0, balance: counter(response.balance) }
+    const attrs = record(promotion.attributes)
+    const max = counter(attrs?.pointmax),
+        progress = counter(attrs?.pointprogress ?? attrs?.progress)
+    if (max === null || progress === null || progress > max) return null
+    return { offered: true, max, progress, remaining: max - progress, balance: counter(response.balance) }
+}
+
 export class ReadToEarn extends BaseActivity {
     public async doReadToEarn() {
+        this.bot.readToEarnVerified = false
         if (!this.bot.accessToken) {
             this.bot.logger.warn(
                 this.bot.isMobile,
@@ -14,43 +44,39 @@ export class ReadToEarn extends BaseActivity {
             )
             return
         }
-
         const delayMin = this.bot.config.searchSettings.readDelay.min
         const delayMax = this.bot.config.searchSettings.readDelay.max
-        const startBalance = Number(this.bot.userData.currentPoints ?? 0)
-
-        this.bot.logger.info(
-            this.bot.isMobile,
-            'READ-TO-EARN',
-            `Starting Read to Earn | geo=${this.bot.userData.geoLocale} | delayRange=${delayMin}-${delayMax} | currentBalance=${startBalance}`
-        )
-
+        const startBalance = this.bot.userData.currentPoints
+        const readState = async () => parseReadToEarnState(await this.bot.browser.func.getAppDashboardData('SAAndroid'))
         try {
-            const jsonData = {
-                amount: 1,
-                id: '1',
-                type: 101,
-                attributes: {
-                    offerid: 'ENUS_readarticle3_30points'
-                },
-                country: this.bot.userData.geoLocale
-            }
-
-            const articleCount = 10
-            let totalGained = 0
-            let articlesRead = 0
-            let oldBalance = startBalance
-
-            for (let i = 0; i < articleCount; ++i) {
-                jsonData.id = randomBytes(64).toString('hex')
-
-                this.bot.logger.debug(
+            let state = await readState()
+            if (!state?.offered || state.max <= 0) {
+                this.bot.logger.warn(
                     this.bot.isMobile,
                     'READ-TO-EARN',
-                    `Submitting Read to Earn activity | article=${i + 1}/${articleCount} | id=${jsonData.id} | country=${jsonData.country}`
+                    'Read to Earn quota unavailable; leaving task pending'
                 )
-
-                const request: HttpRequestConfig = {
+                return
+            }
+            if (state.remaining === 0) {
+                this.bot.readToEarnVerified = true
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'READ-TO-EARN',
+                    `Read to Earn already complete | progress=${state.progress}/${state.max}`
+                )
+                return
+            }
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'READ-TO-EARN',
+                `Starting Read to Earn | geo=${this.bot.userData.geoLocale} | delayRange=${delayMin}-${delayMax} | currentBalance=${startBalance} | remaining=${state.remaining}`
+            )
+            let totalGained = 0,
+                articlesRead = 0,
+                stagnant = 0
+            for (let i = 0; i < 10 && state.remaining > 0; i++) {
+                const response = await this.bot.http.request<{ response?: { balance?: number } }>({
                     url: URLs.platform.activities,
                     method: 'POST',
                     headers: {
@@ -61,66 +87,71 @@ export class ReadToEarn extends BaseActivity {
                         'X-Rewards-Language': this.bot.userData.langCode,
                         'X-Rewards-ismobile': 'true'
                     },
-                    data: JSON.stringify(jsonData)
+                    data: JSON.stringify({
+                        amount: 1,
+                        id: randomBytes(64).toString('hex'),
+                        type: 101,
+                        attributes: { offerid: 'ENUS_readarticle3_30points' },
+                        country: this.bot.userData.geoLocale
+                    })
+                })
+                let updated = await readState()
+                for (let poll = 0; poll < 2 && updated?.offered && updated.progress === state.progress; poll++) {
+                    await this.bot.utils.wait(1000)
+                    updated = await readState()
                 }
-
-                const response = await this.bot.http.request<{ response?: { balance?: number } }>(request)
-
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'READ-TO-EARN',
-                    `Received Read to Earn response | article=${i + 1}/${articleCount} | status=${response?.status ?? 'unknown'}`
-                )
-
-                const newBalance = Number(response?.data?.response?.balance ?? oldBalance)
-                const gainedPoints = newBalance - oldBalance
-
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'READ-TO-EARN',
-                    `Balance delta after article | article=${i + 1}/${articleCount} | previousBalance=${oldBalance} | currentBalance=${newBalance} | pointsGained=${gainedPoints}`
-                )
-
-                if (gainedPoints <= 0) {
-                    this.bot.logger.info(
+                if (!updated?.offered || updated.max !== state.max || updated.progress < state.progress) {
+                    this.bot.logger.warn(
                         this.bot.isMobile,
                         'READ-TO-EARN',
-                        `No points gained, stopping Read to Earn | article=${i + 1}/${articleCount} | status=${response.status} | pointsGained=0 | currentBalance=${newBalance}`
+                        'Could not verify article progress; leaving task pending'
                     )
                     break
                 }
-
-                this.bot.userData.currentPoints = newBalance
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
-                totalGained += gainedPoints
-                articlesRead = i + 1
-                oldBalance = newBalance
-
+                const gainedPoints = updated.progress - state.progress
+                const balances = [counter(response.data?.response?.balance), updated.balance].filter(
+                    (n): n is number => n !== null
+                )
+                if (balances.length)
+                    this.bot.userData.currentPoints = Math.max(this.bot.userData.currentPoints, ...balances)
+                state = updated
+                if (gainedPoints > 0) {
+                    stagnant = 0
+                    articlesRead++
+                    totalGained += gainedPoints
+                    this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gainedPoints
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'READ-TO-EARN',
+                        `Read article ${articlesRead}/10 | status=${response.status} | pointsGained=${gainedPoints} | currentBalance=${this.bot.userData.currentPoints}`,
+                        'green'
+                    )
+                } else {
+                    stagnant++
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'READ-TO-EARN',
+                        `No article progress | attempts=${stagnant}/3 | remaining=${state.remaining}`
+                    )
+                    if (stagnant >= 3) break
+                }
+                if (state.remaining > 0 && i < 9) {
+                    await waitForActivity(this.bot, this.bot.utils.randomDelay(delayMin, delayMax))
+                }
+            }
+            this.bot.readToEarnVerified = state.remaining === 0
+            if (this.bot.readToEarnVerified)
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'READ-TO-EARN',
-                    `Read article ${i + 1}/${articleCount} | status=${response.status} | pointsGained=${gainedPoints} | currentBalance=${newBalance}`,
-                    'green'
+                    `Completed Read to Earn | articlesRead=${articlesRead} | pointsGained=${totalGained} | previousBalance=${startBalance} | currentBalance=${this.bot.userData.currentPoints}`
                 )
-
-                this.bot.logger.debug(
+            else
+                this.bot.logger.warn(
                     this.bot.isMobile,
                     'READ-TO-EARN',
-                    `Waiting between articles | article=${i + 1}/${articleCount} | delayRange=${delayMin}-${delayMax}`
+                    `Completion not verified | articlesRead=${articlesRead} | remaining=${state.remaining}`
                 )
-
-                if (i < articleCount - 1) {
-                    await this.bot.utils.wait(this.bot.utils.randomDelay(delayMin, delayMax))
-                }
-            }
-
-            const finalBalance = Number(this.bot.userData.currentPoints ?? startBalance)
-
-            this.bot.logger.info(
-                this.bot.isMobile,
-                'READ-TO-EARN',
-                `Completed Read to Earn | articlesRead=${articlesRead} | pointsGained=${totalGained} | previousBalance=${startBalance} | currentBalance=${finalBalance}`
-            )
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,

@@ -1,3 +1,5 @@
+import { readEarnPage } from './parsers/EarnPageParser'
+import { mergeRenderedEarn } from './parsers/RenderedEarn'
 import { URLs } from '../constants/urls'
 import { BING_APP_USER_AGENT } from '../constants/userAgents'
 import type { BrowserContext, Cookie, Page } from 'patchright'
@@ -7,12 +9,18 @@ import type { MicrosoftRewardsBot } from '../index'
 import type { PageSnapshot, ParsedOffer } from './ReactFunc'
 import { loadSession, saveStorageState } from '../util/SessionStore'
 import { isBrowserClosedError } from '../util/Utils'
+import { markContextClosing } from './BrowserLifecycle'
 
 import type { DashboardData, DashboardImpression } from './../interface/DashboardData'
 import type { AppUserData } from '../interface/AppUserData'
 import type { AppEarnablePoints, BrowserEarnablePoints } from '../interface/Points'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
-import { detectFlyoutBotWarning, mapFlyoutToDashboard, type RewardsFlyoutData } from './FlyoutDashboard'
+import {
+    detectFlyoutBotWarning,
+    FlyoutAccountDataError,
+    mapFlyoutToDashboard,
+    type RewardsFlyoutData
+} from './FlyoutDashboard'
 import {
     classifyRewardsPage,
     finiteNonNegative,
@@ -28,6 +36,7 @@ export default class BrowserFunc {
 
     private bootstrapRecoveryInProgress = false
     private readonly pointCache = new Map<string, ReliableValue<number>>()
+    private readonly bingDashboardRecovery = new Set<string>()
     public balanceReliability: ReliableValue<number> = reliableValue<number>(null, null, 'unknown')
     public quotaReliability: ReliableValue<boolean> = reliableValue<boolean>(null, null, 'unknown')
 
@@ -62,10 +71,20 @@ export default class BrowserFunc {
 
                 await this.applyResponseCookies(URLs.rewards.userInfoApi, response.headers['set-cookie'])
 
+                const hasDashboard = Boolean(response.data?.dashboard)
+                const hasUserStatus = Boolean(response.data?.dashboard?.userStatus)
                 if (this.validDashboard(response.data)) {
                     await this.updateSearchCountersFromEarnPage(response.data, cookies, fingerprintHeaders)
                     this.rememberBalance(response.data.dashboard.userStatus.availablePoints, 'rewards-api')
                     return response.data
+                }
+                if (attempt === 0) {
+                    this.bot.logger.debug(
+                        this.bot.isMobile,
+                        'GET-DASHBOARD-DATA',
+                        `Dashboard response rejected | status=${response.status} | type=${typeof response.data}` +
+                            ` | dashboard=${hasDashboard} | userStatus=${hasUserStatus}`
+                    )
                 }
                 throw new Error('Dashboard API response is missing verified Rewards account data')
             } catch (error) {
@@ -82,6 +101,36 @@ export default class BrowserFunc {
                 return dashboard
             } catch (error) {
                 lastError = error
+                const recoveryKey = this.pointCacheKey()
+                if (
+                    error instanceof FlyoutAccountDataError &&
+                    !cookies &&
+                    recoveryKey &&
+                    !this.bingDashboardRecovery.has(recoveryKey) &&
+                    !this.bot.shuttingDown &&
+                    this.getActivePage()
+                ) {
+                    this.bingDashboardRecovery.add(recoveryKey)
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'GET-DASHBOARD-DATA',
+                        'Rewards is signed in but Bing account data is unavailable; verifying the existing Bing session once'
+                    )
+                    if (await this.bot.recoverCurrentBingSession()) {
+                        try {
+                            const dashboard = await this.getFlyoutDashboardData(undefined, fingerprintHeaders)
+                            this.rememberBalance(dashboard.dashboard.userStatus.availablePoints, 'bing-flyout')
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'GET-DASHBOARD-DATA',
+                                'Rewards data recovered after Bing session verification'
+                            )
+                            return dashboard
+                        } catch (recoveryError) {
+                            lastError = recoveryError
+                        }
+                    }
+                }
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'GET-DASHBOARD-DATA',
@@ -118,6 +167,17 @@ export default class BrowserFunc {
         })
 
         await this.applyResponseCookies(URLs.bing.rewardsFlyoutUserInfo, response.headers['set-cookie'])
+
+        if (!response.data?.userInfo?.isRewardsUser || !response.data?.flyoutResult?.userStatus?.isRewardsUser) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'GET-DASHBOARD-DATA',
+                `Flyout response rejected | status=${response.status} | type=${typeof response.data}` +
+                    ` | userInfo=${Boolean(response.data?.userInfo)} | profile=${Boolean(response.data?.userInfo?.profile)}` +
+                    ` | rewardsUser=${response.data?.userInfo?.isRewardsUser === true}` +
+                    ` | flyout=${Boolean(response.data?.flyoutResult)} | flyoutRewardsUser=${response.data?.flyoutResult?.userStatus?.isRewardsUser === true}`
+            )
+        }
 
         const detection = detectFlyoutBotWarning(response.data)
         this.bot.logger.debug(
@@ -169,6 +229,15 @@ export default class BrowserFunc {
             this.quotaReliability = reliableValue(true, 'rewards-rsc', 'fresh')
             this.bot.logger.info(
                 this.bot.isMobile,
+                'SMART-QUOTA',
+                JSON.stringify({
+                    readAt: new Date().toISOString(),
+                    desktop: search.pc,
+                    mobile: search.mobile
+                })
+            )
+            this.bot.logger.info(
+                this.bot.isMobile,
                 'GET-DASHBOARD-DATA',
                 `Search quota from Rewards earn page | desktop=${search.pc ? `${search.pc.progress}/${search.pc.max}` : 'not offered'}` +
                     ` | mobile=${search.mobile ? `${search.mobile.progress}/${search.mobile.max}` : 'not offered'}`
@@ -187,10 +256,10 @@ export default class BrowserFunc {
         return error instanceof Error ? error.message : String(error)
     }
 
-    async getAppDashboardData(): Promise<AppDashboardData> {
+    async getAppDashboardData(channel: 'SAIOS' | 'SAAndroid' = 'SAIOS'): Promise<AppDashboardData> {
         try {
             const request: HttpRequestConfig = {
-                url: URLs.platform.me('SAIOS'),
+                url: URLs.platform.me(channel),
                 method: 'GET',
                 headers: {
                     Authorization: `Bearer ${this.bot.accessToken}`,
@@ -339,7 +408,9 @@ export default class BrowserFunc {
             )
         }
 
-        const payloadPoints = finiteNonNegative(this.bot.reactSnapshot?.account.availablePoints)
+        // A cached bootstrap snapshot is display data, not a new balance observation.
+        const refreshed = await this.refreshEarnSnapshot()
+        const payloadPoints = finiteNonNegative(refreshed?.account.availablePoints)
         if (payloadPoints !== null) {
             this.rememberBalance(payloadPoints, 'rewards-rsc')
             return payloadPoints
@@ -519,6 +590,21 @@ export default class BrowserFunc {
      */
     private async dismissRewardsWelcomeDialog(page: Page, deadline = Date.now() + 10_000): Promise<void> {
         try {
+            // New accounts see a welcome dialog with a Get started button,
+            // whereas older Rewards layouts expose a close-slot button.
+            // Limit the text match to the welcome dialog so unrelated actions
+            // (including consent or redemption) cannot be activated here.
+            const welcomeDialog = typeof page.getByRole === 'function'
+                ? page.getByRole('dialog').filter({ hasText: /welcome to\s+microsoft rewards/i }).first()
+                : null
+            if (welcomeDialog && await welcomeDialog.isVisible().catch(() => false)) {
+                const getStarted = welcomeDialog.getByRole('button', { name: /^get started$/i }).first()
+                if (await getStarted.isVisible().catch(() => false)) {
+                    await getStarted.click({ timeout: Math.max(250, Math.min(5000, deadline - Date.now())) })
+                    this.bot.logger.info(this.bot.isMobile, 'BOOTSTRAP', 'Dismissed welcome dialog with Get started')
+                    return
+                }
+            }
             const welcomeButton = await page
                 .waitForSelector('section[role="dialog"] button[slot="close"]', {
                     timeout: Math.max(250, Math.min(5000, deadline - Date.now()))
@@ -734,6 +820,7 @@ export default class BrowserFunc {
             }
         } finally {
             try {
+                markContextClosing(browser)
                 await browser.close()
 
                 if (rootBrowser) {
@@ -1090,7 +1177,7 @@ export default class BrowserFunc {
     async reportServerAction(
         actionId: string,
         body: unknown[],
-        opts?: { url?: string; referer?: string; routerStateTree?: string }
+        opts?: { url?: string; referer?: string; routerStateTree?: string; browserFallback?: boolean }
     ): Promise<{ status: number; acknowledged: boolean; availablePoints: number | null }> {
         const url = opts?.url ?? URLs.rewards.earn
         const referer = opts?.referer ?? url
@@ -1111,15 +1198,43 @@ export default class BrowserFunc {
             ...(this.rewardsDeploymentId ? { 'X-Deployment-Id': this.rewardsDeploymentId } : {})
         }
 
-        const response = await this.bot.http.request({
-            url,
-            method: 'POST',
-            headers: {
-                ...headers,
-                Cookie: this.buildCookieHeader(this.getCachedCookies(undefined, url))
-            },
-            data: JSON.stringify(body)
-        })
+        let response
+        try {
+            response = await this.bot.http.request({
+                url,
+                method: 'POST',
+                headers: {
+                    ...headers,
+                    Cookie: this.buildCookieHeader(this.getCachedCookies(undefined, url))
+                },
+                data: JSON.stringify(body)
+            })
+        } catch (error) {
+            const status = (error as { status?: number }).status
+            const page = this.getActivePage()
+            if (!opts?.browserFallback || status !== 503 || !page) throw error
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'SERVER-ACTION',
+                'HTTP transport returned 503; retrying once through the active browser context'
+            )
+            // Reuse this account's browser proxy and cookie jar; never fall back to a direct connection.
+            const browserResponse = await page.request.post(url, {
+                headers,
+                data: JSON.stringify(body),
+                timeout: 20000
+            })
+            if (!browserResponse.ok()) {
+                throw new Error(`Browser server action failed with status code ${browserResponse.status()}`)
+            }
+            await this.syncActiveCookies(page, 'SERVER-ACTION')
+            const payload = await browserResponse.text()
+            return {
+                status: browserResponse.status(),
+                acknowledged: this.bot.utils.serverActionAcknowledged(payload),
+                availablePoints: this.bot.browser.react.availablePointsFromPayload(payload)
+            }
+        }
         await this.applyResponseCookies(url, response.headers['set-cookie'])
 
         return {
@@ -1129,7 +1244,29 @@ export default class BrowserFunc {
         }
     }
 
-    async refreshEarnSnapshot(): Promise<PageSnapshot | null> {
+    /** Read through an isolated tab in the existing account context and always close it. */
+    async withRewardsPage<T>(url: string, read: (page: Page) => Promise<T>): Promise<T | null> {
+        const active = this.getActivePage()
+        if (!active || active.isClosed()) return null
+        let tab: Page | undefined
+        try {
+            tab = await this.bot.newBrowserPage(active.context())
+            await tab.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+            if (new URL(tab.url()).origin !== URLs.rewards.origin) return null
+            await tab.locator('main').waitFor({ state: 'visible', timeout: 5000 })
+            await tab.locator('#dailyset, #moreactivities, #quests, main h3').first()
+                .waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+            return await read(tab)
+        } catch (error) {
+            this.bot.logger.debug(this.bot.isMobile, 'RENDERED-REWARDS',
+                `Rendered verification unavailable | ${error instanceof Error ? error.message : String(error)}`)
+            return null
+        } finally {
+            await tab?.close().catch(() => {})
+        }
+    }
+
+    async refreshEarnSnapshot(options?: { rendered?: boolean }): Promise<PageSnapshot | null> {
         const page = this.bot.isMobile ? this.bot.mainMobilePage : this.bot.mainDesktopPage
         const usePage = !!page && !page.isClosed()
 
@@ -1144,7 +1281,22 @@ export default class BrowserFunc {
         ])
         const availablePages = pages.filter((html): html is string => html !== null)
 
-        return availablePages.length ? this.bot.browser.react.snapshotPage(availablePages) : null
+        let snapshot = availablePages.length ? this.bot.browser.react.snapshotPage(availablePages) : null
+        if (options?.rendered) {
+            const rendered = await this.withRewardsPage(URLs.rewards.earn, async page => {
+                const { cards, balance } = await readEarnPage(page)
+                // Scrolling can deliver more Flight chunks; parse after the DOM read.
+                const fresh = this.bot.browser.react.snapshotPage(await page.content())
+                fresh.account.availablePoints ??= balance
+                fresh.unmatchedEarnCards = mergeRenderedEarn(fresh, cards, page.url())
+                fresh.morePromotionsAvailable ||= await page.locator('#moreactivities, #exploreonbing').count() > 0
+                this.bot.logger.info(this.bot.isMobile, 'RENDERED-REWARDS',
+                    `Earn verified | cards=${cards.length} | offers=${fresh.offers.length} | unmatched=${fresh.unmatchedEarnCards}`)
+                return fresh
+            })
+            if (rendered) snapshot = rendered
+        }
+        return snapshot
     }
 
     private async fetchRewardsHtml(url: string, route: string): Promise<string | null> {

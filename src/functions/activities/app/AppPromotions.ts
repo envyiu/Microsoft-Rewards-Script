@@ -1,3 +1,4 @@
+import { waitForActivity } from '../../../util/ActivityTiming'
 import { BaseActivity } from '../BaseActivity'
 import type { AppDashboardData } from '../../../interface/AppDashBoardData'
 
@@ -29,7 +30,7 @@ export class AppPromotions extends BaseActivity {
         for (const [index, promotion] of pending.entries()) {
             await this.bot.activities.doAppReward(promotion)
             if (index < pending.length - 1) {
-                await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 15000))
+                await waitForActivity(this.bot, this.bot.utils.randomDelay(5000, 15000))
             }
         }
         this.bot.logger.info(this.bot.isMobile, 'APP-PROMOTIONS', 'Finished processing "App Promotions" items')

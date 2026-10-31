@@ -55,6 +55,8 @@ function formatMessage(message: string | Error): string {
 }
 
 export class Logger {
+    public workerFailureCount = 0
+
     constructor(private bot: MicrosoftRewardsBot) {}
 
     info(isMobile: Platform, title: string, message: string, color?: ColorKey) {
@@ -73,6 +75,10 @@ export class Logger {
         return this.baseLog('debug', isMobile, title, message, color)
     }
 
+    markWorkerFailure(): void {
+        this.workerFailureCount += 1
+    }
+
     private baseLog(
         level: LogLevel,
         isMobile: Platform,
@@ -80,6 +86,7 @@ export class Logger {
         message: string | Error,
         color?: ColorKey
     ): void {
+        if (level === 'error') this.markWorkerFailure()
         const config = this.bot.config
         if (level === 'debug' && !config.debugLogs && !process.argv.includes('-dev')) return
 

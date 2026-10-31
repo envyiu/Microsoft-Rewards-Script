@@ -33,7 +33,7 @@ For a docs-only change, verify paths and links, line/format sanity and `git diff
 When adding or changing a configuration field, trace every layer:
 
 1. Add/update the TypeScript interface in `src/interface/Config.ts`.
-2. Add/update Zod schema, constraints and runtime default in `src/config/Validator.ts`.
+2. Add/update pure Zod schema/defaults in `src/contracts/BotConfig.ts`; keep runtime filling/validation in `src/util/Validator.ts`. Rebuild the versioned contracts package and refresh Manager's vendored package; do not copy a validator into Manager.
 3. Add/update `config.example.json` with safe, non-secret documentation values.
 4. Add Docker `CONFIG_*` parsing/override support if the field is container-operable.
 5. Check `ConfigSync` behavior for old config files and missing keys.
@@ -168,12 +168,12 @@ Classify every endpoint as read-only or state-changing. Preserve token checks an
 
 At the time this handoff was written, the worktree already contained user changes in `package.json`, browser/auth files, search activity files and `src/functions/search-queries.json`, plus an untracked `config.json.bak` and `scripts/api/searchQuota.test.js`; `env.example` was deleted in the worktree. Do not restore, reformat, squash or discard these changes as part of unrelated work.
 
-The current validation baseline completed successfully after building first:
+Previously recorded test totals describe an older snapshot, not current acceptance. Re-run the relevant scripts rather than relying on historical counts:
 
 - `npm run build`
 - `npm run lint`
-- `npm run test:log-parser` — 9 passing tests
-- `npm run test:search-quota` — 4 passing tests
+- `npm run test:log-parser`
+- `npm run test:search-quota`
 
 The quota test initially raced a parallel build and could not import `dist`; that was an execution-order issue. Run it sequentially after build.
 
@@ -191,3 +191,53 @@ Before handing off code:
 - [ ] `npm run build`, `npm run lint` and relevant tests passed, or failures are explicitly explained.
 - [ ] `git diff --check` is clean.
 - [ ] Live-account/Docker/API behavior not actually tested is labeled as unverified.
+
+## 14. Manager / Worker change verification
+
+Read [Manager architecture](../../../../rewards-dashboard/manager/ARCHITECTURE.md) for the protocol/state-machine contracts. Worker/controller changes should cover:
+
+```bash
+npm run build
+npm run build:contracts
+npm run test:worker
+node --test scripts/api/hybrid.test.js scripts/api/hybridApi.test.js scripts/api/smartScheduler.test.js
+npm run lint
+```
+
+After shared contract or Manager changes, from the sibling `rewards-dashboard/manager` directory:
+
+```bash
+npm run prepare:contracts
+npm ci --ignore-scripts
+npm test
+npm run release
+```
+
+Build Worker with `npm run release:worker`, then pass the absolute archive paths to Manager's `npm run test:releases -- MANAGER_TGZ WORKER_TGZ` and `npm run test:installers -- MANAGER_TGZ WORKER_TGZ`. These install temporary isolated copies; they must not contact Microsoft, use real credentials, restart host services or run real sudo. Installer QA requires an available browser cache. Exercise startup via `current` symlinks and check unit warning output as well as exit codes.
+
+Required regressions for ownership/manual work:
+
+- Idle account opens while an unrelated VPS job, a same-proxy job and local work keep their process IDs. Closing/returning its session also preserves those processes.
+- Selecting the actually running account returns `WAITING_FOR_RUN` without stopping that job. Its persisted hold blocks only that account; cancelling before activation restores its source rights.
+- Membership-only snapshots preserve all retained account environment/profile/node settings. Changes to those settings must not bypass runtime drain.
+- Desktop/mobile cookies, fingerprints and region survive transfer/restart/return. Failed checkpoints, offline sources and interrupted activation keep rights held and cannot use cached sessions.
+- Android remains local only while manually held; device stop and clean browser exits gate return. A viewer close must not release a running device.
+- Manager restart does not stop worker jobs; backfill is deduplicated. Desired state prepared before reconnect advances beyond worker generation.
+- Manual helper config is outside the release cwd; source `.env` cannot override the accepted subset.
+- Concurrent automatic/manual return requests create one durable return operation; retries reuse it across restart. A local-owned manual open/close never revokes its own roster or deletes desktop/mobile sessions. Recover a legacy interrupted self-transfer from its validated staged session under the existing hold, never by removing the hold or replacing the whole session database.
+
+For dashboard integration, run `npm test`, `npm run test:machines` and `npm run test:ui` from `rewards-dashboard/rewards-dashboard`, with `PLAYWRIGHT_MODULE` when needed. Report synthetic checks separately from a user-authorized live smoke check. Docs-only updates do not require re-running live work or restarting services.
+
+## 15. Rewards quest / Keep earning / streak regressions
+
+For new-account changes, run `npm run test:new-account` after build. Cover zero Rewards network traffic with a real browser (navigation, iframe, popup, background fetch), Microsoft-only login without Rewards finalization, exact 168-hour eligibility, daily rollover, query checkpoint replay, imports defaulting only future Outlook/Hotmail records, and normal runtime refusing premature entry. Onboarding fixtures must verify manual goal tracking, no redemption, fresh parent progress and repeat-safe continuation. Keep both desktop/mobile saved state and planner lifecycle through handoff. Live tests on new accounts verify only pre-Rewards behavior; real onboarding is deferred until the full seven days have elapsed.
+
+Run `npm run test:rewards-activities`, `npm run test:log-parser` and `npm run test:search-quota` after build. Cover colliding record IDs across pages, lazy/property references, zero-point activation, newly unlocked steps, disappearing completed CTAs, unacknowledged reports, seven-day/24-hour search conditions and missing hashes. Preserve activity opt-outs during browser fallbacks; never install/download an application or follow redemption links as a generic fallback. No new proxy, context identity or manual ownership flow is needed for a normal card visit.
+
+For streak changes run dashboard `npm test` (structured validation, source replay, restart, stale/unknown/zero rendering) and Manager tests. Refresh the bundled contracts using `npm run build:contracts` and Manager `prepare:contracts`; both consumers must use the same `rewards.cjs`. UI browser QA uses Playwright, not Patchright's isolated evaluation worlds. Private real payloads stay outside Git; tests use synthetic hashes and identities. Only report live completion after a fresh Microsoft state confirms it.
+
+At the first scheduler startup after this correction, `migrateRewardsVerification` sets state `rewardsVerificationVersion=1` and reopens only `morePromotions`/`punchCards` completion/failure/retry fields once. Other workers, search progress, sessions and holds stay intact. Repeated startup must not reopen them again. Pause/drain and back up the real state before rollout; preserve each node's previous scheduler settings when resuming.
+
+## Selective v5 Rewards verification
+
+Run `npm run test:rewards-activities` (includes `upstreamRewards.test.js`) after build. The suite covers rendered DOM Earn/Quest parsing, unique card matching, missing hashes, delayed credit, unrelated balance changes, stale balances and expired streak periods. Preserve existing activation/unlock, multi-day deferral and Smart completion tests. Also run build/lint, log parser, search quota, scheduler, new-account and worker suites. A live canary must use an assigned non-new account on a paused/drained worker, preserve saved sessions/proxy/fingerprint, and report actual pending steps separately from completed ones. Do not claim a points-earning path passed if the live account only had already-completed offers. Restore previous per-node schedules and capacity after maintenance.

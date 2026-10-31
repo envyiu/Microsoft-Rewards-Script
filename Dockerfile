@@ -80,6 +80,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy compiled application and dependencies from builder stage
 COPY --from=builder /usr/src/microsoft-rewards-script/dist ./dist
+COPY --from=builder /usr/src/microsoft-rewards-script/common ./common
+COPY --from=builder /usr/src/microsoft-rewards-script/packages/contracts ./packages/contracts
 COPY --from=builder /usr/src/microsoft-rewards-script/package*.json ./
 COPY --from=builder /usr/src/microsoft-rewards-script/node_modules ./node_modules
 

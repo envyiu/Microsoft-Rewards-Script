@@ -1,3 +1,4 @@
+import { waitForActivity, waitForSearch } from '../../../util/ActivityTiming'
 import { BaseActivity } from '../BaseActivity'
 import { activateSearchOnBing, findSearchOnBingOffer, getSearchOnBingQueries } from '../search/SearchOnBingShared'
 
@@ -89,7 +90,7 @@ export class ApiSearchOnBing extends BaseActivity {
                     continue
                 }
 
-                await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 7000))
+                await waitForSearch(this.bot, this.bot.utils.randomDelay(5000, 7000))
 
                 const dashboard = (await this.bot.browser.func.getDashboardData()).dashboard
                 const newBalance = dashboard.userStatus.availablePoints
@@ -138,7 +139,7 @@ export class ApiSearchOnBing extends BaseActivity {
                 )
             } finally {
                 if (!this.success && index < queries.length - 1) {
-                    await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 15000))
+                    await waitForActivity(this.bot, this.bot.utils.randomDelay(5000, 15000))
                 }
             }
         }

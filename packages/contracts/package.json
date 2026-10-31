@@ -1,0 +1,28 @@
+{
+    "name": "@msrw/contracts",
+    "version": "1.1.0",
+    "private": true,
+    "type": "module",
+    "engines": {
+        "node": ">=24.0.0"
+    },
+    "exports": {
+        ".": "./index.js",
+        "./accounts": "./accounts.js",
+        "./account-store": "./accountStore.js",
+        "./store": "./store.js",
+        "./smart": "./smartConfig.js",
+        "./protocol": "./protocol.js",
+        "./env": "./env.js",
+        "./rewards": "./rewards.cjs"
+    },
+    "dependencies": {
+        "zod": "4.6.7",
+        "ms": "2.1.3"
+    },
+    "files": [
+        "*.js",
+        "*.cjs",
+        "dist/"
+    ]
+}

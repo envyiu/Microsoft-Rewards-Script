@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-function resolveSessionDb(projectRoot, sessionPath) {
+export function resolveSessionDb(projectRoot, sessionPath) {
     const candidates = [
         path.resolve(process.cwd(), sessionPath, 'sessions.db'),
         path.join(projectRoot, sessionPath, 'sessions.db'),
@@ -11,6 +11,68 @@ function resolveSessionDb(projectRoot, sessionPath) {
     ]
     const dbPath = candidates.find(candidate => fs.existsSync(candidate)) ?? candidates[0]
     return { dbPath, exists: fs.existsSync(dbPath) }
+}
+
+// Internal node-to-node transport only. Never expose these records on /sessions.
+export function exportAccountSession(projectRoot, sessionPath, email) {
+    const { dbPath, exists } = resolveSessionDb(projectRoot, sessionPath)
+    if (!exists) return { sessions: [], metadata: null }
+    const db = openDatabase(dbPath, true)
+    try {
+        const sessions = db.prepare('SELECT * FROM sessions WHERE email = ?').all(email)
+        let metadata = null
+        try {
+            metadata = db.prepare('SELECT * FROM account_metadata WHERE email = ?').get(email) ?? null
+        } catch {}
+        return { sessions, metadata }
+    } finally {
+        closeDatabase(db)
+    }
+}
+
+export function validateAccountSession(email, bundle) {
+    if (!Array.isArray(bundle?.sessions) || bundle.sessions.length > 2) throw new Error('Invalid session bundle')
+    for (const row of bundle.sessions) {
+        if (row.email !== email || !['desktop', 'mobile'].includes(row.platform))
+            throw new Error('Invalid session identity')
+        for (const field of ['storage_state', 'fingerprint']) {
+            if (row[field] != null) JSON.parse(row[field])
+        }
+    }
+    if (bundle.metadata && bundle.metadata.email !== email) throw new Error('Invalid metadata identity')
+}
+
+export function importAccountSession(projectRoot, sessionPath, email, bundle) {
+    validateAccountSession(email, bundle)
+    const { dbPath } = resolveSessionDb(projectRoot, sessionPath)
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 })
+    const db = openDatabase(dbPath, false)
+    try {
+        fs.chmodSync(dbPath, 0o600)
+        db.exec(`CREATE TABLE IF NOT EXISTS sessions (email TEXT NOT NULL, platform TEXT NOT NULL,
+            storage_state TEXT, fingerprint TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(email,platform));
+            CREATE TABLE IF NOT EXISTS account_metadata (email TEXT PRIMARY KEY COLLATE NOCASE,
+            resolved_region TEXT, updated_at INTEGER NOT NULL); BEGIN IMMEDIATE`)
+        db.prepare('DELETE FROM sessions WHERE email = ?').run(email)
+        const insert = db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?)')
+        for (const row of bundle.sessions)
+            insert.run(email, row.platform, row.storage_state, row.fingerprint, row.updated_at)
+        db.prepare('DELETE FROM account_metadata WHERE email = ?').run(email)
+        if (bundle.metadata)
+            db.prepare('INSERT INTO account_metadata VALUES (?, ?, ?)').run(
+                email,
+                bundle.metadata.resolved_region,
+                bundle.metadata.updated_at
+            )
+        db.exec('COMMIT')
+    } catch (error) {
+        try {
+            db.exec('ROLLBACK')
+        } catch {}
+        throw error
+    } finally {
+        closeDatabase(db)
+    }
 }
 
 function openDatabase(dbPath, readOnly) {

@@ -9,6 +9,8 @@ import type {
 
 export const BOT_SCORE_WARNING = 'Fraud_UserWarning_BotScore_UX'
 
+export class FlyoutAccountDataError extends Error {}
+
 type FlyoutProfileAttributes = Profile['attributes'] & {
     rbs?: string | number
     rbs_upd?: string
@@ -115,7 +117,7 @@ export function mapFlyoutToDashboard(data: RewardsFlyoutData): DashboardData {
 
     if (data.isError || !userInfo?.isRewardsUser || !profile || !flyout || !flyoutStatus?.isRewardsUser) {
         const message = data.errorMessage ?? userInfo?.errorMessage ?? 'Flyout response is missing Rewards account data'
-        throw new Error(message)
+        throw new FlyoutAccountDataError(message)
     }
 
     const availablePoints = finiteNonNegative(flyoutStatus.availablePoints, userInfo.balance)

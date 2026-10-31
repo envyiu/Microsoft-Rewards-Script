@@ -3,13 +3,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import type { BrowserContext } from 'patchright'
-import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
+import type { BrowserIdentitySnapshot } from '../interface/BrowserIdentity'
 
 export type StorageState = Awaited<ReturnType<BrowserContext['storageState']>>
 
 export interface LoadedSession {
     storageState: StorageState | null
-    fingerprint: BrowserFingerprintWithHeaders | null
+    fingerprint: BrowserIdentitySnapshot | null
     updatedAt: number
     expiredCookiesRemoved: number
 }
@@ -109,7 +109,7 @@ export function loadSession(
 
     return {
         storageState: sanitized.storageState,
-        fingerprint: row.fingerprint ? (JSON.parse(row.fingerprint) as BrowserFingerprintWithHeaders) : null,
+        fingerprint: row.fingerprint ? (JSON.parse(row.fingerprint) as BrowserIdentitySnapshot) : null,
         updatedAt: row.updated_at,
         expiredCookiesRemoved: sanitized.expiredCookiesRemoved
     }
@@ -147,7 +147,7 @@ export function saveFingerprint(
     sessionPath: string,
     email: string,
     isMobile: boolean,
-    fingerprint: BrowserFingerprintWithHeaders
+    fingerprint: BrowserIdentitySnapshot
 ): void {
     getDb(sessionPath)
         .prepare(

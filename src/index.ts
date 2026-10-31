@@ -3,27 +3,28 @@ import cluster, { Worker } from 'cluster'
 import type { BrowserContext, Cookie, Page } from 'patchright'
 import pkg from '../package.json'
 
-import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
-
 import Browser from './browser/Browser'
 import BrowserFunc from './browser/BrowserFunc'
 import BrowserUtils from './browser/BrowserUtils'
 import ReactFunc from './browser/ReactFunc'
+import { markContextClosing } from './browser/BrowserLifecycle'
 import type { PageSnapshot } from './browser/ReactFunc'
 
 import { IpcLog, Logger } from './logging/Logger'
 import Utils, { isBrowserClosedError } from './util/Utils'
 import { loadAccounts, loadConfig } from './util/Load'
-import { closeSessionStore, loadResolvedRegion, saveResolvedRegion } from './util/SessionStore'
+import { closeSessionStore, loadResolvedRegion, saveResolvedRegion, saveStorageState } from './util/SessionStore'
 import { checkNodeVersion } from './util/Validator'
 import { normalizeCountry, resolveAccountLocale } from './util/Locale'
 import type { AccountLocale } from './util/Locale'
 
 import { Login } from './browser/auth/Login'
 import Activities from './functions/Activities'
+import { runNewAccountSession } from './functions/NewAccount'
 import { SearchManager } from './functions/activities/search/SearchManager'
 
 import type { Account } from './interface/Account'
+import type { BrowserIdentitySnapshot } from './interface/BrowserIdentity'
 import HttpClient from './util/Http'
 import { sendDiscord, flushDiscordQueue } from './logging/Discord'
 import { sendNtfy, flushNtfyQueue } from './logging/Ntfy'
@@ -40,7 +41,7 @@ interface ExecutionContext {
 
 interface BrowserSession {
     context: BrowserContext
-    fingerprint: BrowserFingerprintWithHeaders
+    fingerprint: BrowserIdentitySnapshot
 }
 
 interface AccountStats {
@@ -86,6 +87,30 @@ interface UserData {
 }
 
 export class MicrosoftRewardsBot {
+    public shuttingDown = false
+    private readonly liveContexts = new Map<BrowserContext, { email: string; isMobile: boolean }>()
+
+    public trackBrowserContext(context: BrowserContext, email: string, isMobile: boolean): void {
+        this.liveContexts.set(context, { email, isMobile })
+        context.once('close', () => this.liveContexts.delete(context))
+    }
+
+    public async checkpointAndCloseBrowsers(): Promise<void> {
+        this.shuttingDown = true
+        // Read all platforms before closing any context: normal cleanup may run concurrently.
+        for (const [context, identity] of this.liveContexts) {
+            const storage = await context.storageState()
+            saveStorageState(this.config.sessionPath, identity.email, identity.isMobile, storage)
+        }
+        this.logger.info('main', 'SESSION-CHECKPOINT', 'All active browser sessions saved')
+        await Promise.allSettled(
+            [...this.liveContexts.keys()].map(async context => {
+                markContextClosing(context)
+                await context.close()
+                await context.browser()?.close()
+            })
+        )
+    }
     public logger: Logger
     public config
     public utils: Utils
@@ -100,6 +125,10 @@ export class MicrosoftRewardsBot {
 
     public nextActions: Record<string, string> = {}
     public nextRouterStateTree = ''
+    public morePromotionsVerified = false
+    public punchCardsVerified = false
+    public dailySetVerified = false
+    public readToEarnVerified = false
     public reactSnapshot: PageSnapshot | null = null
     public reactSnapshots: { mobile: PageSnapshot | null; desktop: PageSnapshot | null } = {
         mobile: null,
@@ -109,12 +138,16 @@ export class MicrosoftRewardsBot {
 
     public accessToken = ''
     public cookies: { mobile: Cookie[]; desktop: Cookie[] }
-    private fingerprintMobile?: BrowserFingerprintWithHeaders
-    private fingerprintDesktop?: BrowserFingerprintWithHeaders
+    private fingerprintMobile?: BrowserIdentitySnapshot
+    private fingerprintDesktop?: BrowserIdentitySnapshot
 
-    get fingerprint(): BrowserFingerprintWithHeaders {
+    get fingerprint(): BrowserIdentitySnapshot {
         const ctx = this.isMobile ? this.fingerprintMobile : this.fingerprintDesktop
-        return (ctx ?? this.fingerprintMobile ?? this.fingerprintDesktop) as BrowserFingerprintWithHeaders
+        return (ctx ?? this.fingerprintMobile ?? this.fingerprintDesktop) as BrowserIdentitySnapshot
+    }
+
+    newBrowserPage(context: BrowserContext): Promise<Page> {
+        return this.browserFactory.newPage(context)
     }
 
     private activeWorkers: number
@@ -156,6 +189,12 @@ export class MicrosoftRewardsBot {
     }
 
     private applyExecutionPlan(plan: ExecutionPlan): void {
+        if (plan.urgent) {
+            this.config.searchSettings.searchDelay = { min: '5sec', max: '8sec' }
+            this.config.searchSettings.readDelay = { min: '0ms', max: '0ms' }
+            this.config.searchSettings.scrollRandomResults = false
+            this.config.searchSettings.clickRandomResults = false
+        }
         const enabled = new Set<SmartWorker>(plan.type === 'workers' ? plan.workers : [])
         const workers = this.config.workers
         workers.doDailySet = workers.doDailySet && enabled.has('dailySet')
@@ -177,20 +216,46 @@ export class MicrosoftRewardsBot {
         this.config.clusters = 1
     }
 
-    private markCompletedSmartWorkers(appAvailable: boolean, data: DashboardData): void {
+    public markCompletedSmartWorkers(
+        appAvailable: boolean,
+        data: DashboardData | undefined,
+        errorBaseline: number,
+        onlyWorker?: SmartWorker
+    ): void {
         const plan = this.executionPlan
-        if (plan?.type !== 'workers') return
+        if (plan?.type !== 'workers' || !onlyWorker) return
+        const workers = plan.workers.filter(worker => worker === onlyWorker)
+        if (this.logger.workerFailureCount > errorBaseline) {
+            for (const worker of workers) {
+                this.logger.warn('main', 'SMART-WORKER-PENDING', `worker=${worker} | reason=activity-error`)
+            }
+            return
+        }
         const appWorkers = new Set<SmartWorker>(['dailyCheckIn', 'appPromotions', 'readToEarn'])
         const reportActivityWorkers = new Set<SmartWorker>([
-            'dailySet',
             'morePromotions',
             'punchCards',
             'activateSearchPerk',
             'visualSearch',
             'streakProtection'
         ])
-        for (const worker of plan.workers) {
+        for (const worker of workers) {
             if (appWorkers.has(worker) && !appAvailable) continue
+            if (
+                (worker === 'dailySet' && !this.dailySetVerified) ||
+                (worker === 'readToEarn' && !this.readToEarnVerified)
+            ) {
+                this.logger.warn('main', 'SMART-WORKER-PENDING', `worker=${worker} | reason=completion-unverified`)
+                continue
+            }
+            if (worker === 'morePromotions' && !this.morePromotionsVerified) {
+                this.logger.warn('main', 'SMART-WORKER-PENDING', 'worker=morePromotions | reason=completion-unverified')
+                continue
+            }
+            if (worker === 'punchCards' && !this.punchCardsVerified) {
+                this.logger.warn('main', 'SMART-WORKER-PENDING', 'worker=punchCards | reason=completion-unverified')
+                continue
+            }
             if (worker === 'claimBonusPoints' && !this.nextActions.reportClaimAllPoints) {
                 this.logger.warn(
                     'main',
@@ -202,11 +267,11 @@ export class MicrosoftRewardsBot {
             const today = this.utils.getFormattedDate()
             const hasDependentOffers =
                 worker === 'dailySet'
-                    ? Boolean(data.dashboard.dailySetPromotions[today]?.length)
+                    ? !data || Boolean(data.dashboard.dailySetPromotions[today]?.length)
                     : worker === 'morePromotions'
-                      ? Boolean(data.dashboard.morePromotions?.length)
+                      ? !data || Boolean(data.dashboard.morePromotions?.length)
                       : worker === 'punchCards'
-                        ? Boolean(data.dashboard.punchCards?.length || this.reactSnapshot?.reportable.length)
+                        ? !data || Boolean(data.dashboard.punchCards?.length || this.reactSnapshot?.reportable.length)
                         : true
             if (reportActivityWorkers.has(worker) && hasDependentOffers && !this.nextActions.reportActivity) {
                 this.logger.warn('main', 'SMART-WORKER-PENDING', `worker=${worker} | reason=action-id-unavailable`)
@@ -222,6 +287,24 @@ export class MicrosoftRewardsBot {
 
     get currentAccountEmail(): string | null {
         return getCurrentContext().account?.email || null
+    }
+
+    async recoverCurrentBingSession(): Promise<boolean> {
+        const { account, isMobile } = getCurrentContext()
+        const page = isMobile ? this.mainMobilePage : this.mainDesktopPage
+        if (this.shuttingDown || !account?.email || !page || page.isClosed()) return false
+        try {
+            const verified = await this.login.verifyBingSession(page, account)
+            if (this.shuttingDown || page.isClosed()) return false
+            await this.browser.func.checkpointActiveSession('BING-DATA-RECOVERY')
+            // Restore Rewards actions/router state after the Bing navigation.
+            await this.browser.func.bootstrap(page)
+            await this.browser.func.checkpointActiveSession('BING-DATA-RECOVERY')
+            return verified
+        } catch {
+            this.logger.warn(this.isMobile, 'BING-DATA-RECOVERY', 'Could not restore verified Bing account data')
+            return false
+        }
     }
 
     async refreshCurrentRewardsContext(reason: string): Promise<boolean> {
@@ -249,7 +332,7 @@ export class MicrosoftRewardsBot {
 
             if (!page || page.isClosed()) {
                 recoverySession = await this.browserFactory.createBrowser(account)
-                page = await recoverySession.context.newPage()
+                page = await this.newBrowserPage(recoverySession.context)
                 if (context.isMobile) {
                     this.mainMobilePage = page
                     this.fingerprintMobile = recoverySession.fingerprint
@@ -348,7 +431,9 @@ export class MicrosoftRewardsBot {
                 `Session start | jobId=${this.executionPlan.jobId} | type=${this.executionPlan.type}` +
                     (this.executionPlan.type === 'search'
                         ? ` | platform=${this.executionPlan.platform} | budget=${this.executionPlan.searchBudget}`
-                        : ` | workers=${this.executionPlan.workers.join(',')}`)
+                        : this.executionPlan.type === 'workers'
+                          ? ` | workers=${this.executionPlan.workers.join(',')}`
+                          : '')
             )
         }
 
@@ -498,6 +583,7 @@ export class MicrosoftRewardsBot {
             const accountEmail = account.email
             this.userData.userName = this.utils.getEmailUsername(accountEmail)
             this.userData.timezoneOffset = String(new Date().getTimezoneOffset())
+            let accountHttpClient: HttpClient | undefined
 
             try {
                 const cachedRegion =
@@ -514,11 +600,13 @@ export class MicrosoftRewardsBot {
                     }`
                 )
 
-                this.http = new HttpClient(account.proxy, {
+                accountHttpClient = new HttpClient(account.proxy, {
                     'Accept-Language': this.accountLocale.acceptLanguage
                 })
+                this.http = accountHttpClient
 
                 const result: AccountRunResult | undefined = await this.Main(account).catch(error => {
+                    if (this.shuttingDown) return undefined
                     void this.logger.error(
                         true,
                         'FLOW',
@@ -526,6 +614,10 @@ export class MicrosoftRewardsBot {
                     )
                     return undefined
                 })
+
+                // A handoff/Stop owns the exit result. Do not turn its closed page
+                // into a login failure or emit a normal failed session afterwards.
+                if (this.shuttingDown) return accountStats
 
                 const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
 
@@ -595,6 +687,16 @@ export class MicrosoftRewardsBot {
                     success: false,
                     error: error instanceof Error ? error.message : String(error)
                 })
+            } finally {
+                await accountHttpClient
+                    ?.close()
+                    .catch(error =>
+                        this.logger.debug(
+                            'main',
+                            'CLEANUP',
+                            `HTTP proxy relay close failed | ${error instanceof Error ? error.message : String(error)}`
+                        )
+                    )
             }
 
             if (this.executionPlan) {
@@ -620,8 +722,10 @@ export class MicrosoftRewardsBot {
                 'green'
             )
 
-            await flushAllWebhooks()
-            process.exit(0)
+            if (!this.shuttingDown) {
+                await flushAllWebhooks()
+                process.exit(0)
+            }
         }
 
         return accountStats
@@ -659,7 +763,7 @@ export class MicrosoftRewardsBot {
 
     async createDesktopSession(account: Account): Promise<BrowserSession> {
         const session = await this.browserFactory.createBrowser(account)
-        this.mainDesktopPage = await session.context.newPage()
+        this.mainDesktopPage = await this.newBrowserPage(session.context)
         this.fingerprintDesktop = session.fingerprint
 
         this.logger.info(this.isMobile, 'BROWSER', `Desktop Browser started | ${account.email}`)
@@ -672,6 +776,31 @@ export class MicrosoftRewardsBot {
     }
 
     async Main(account: Account): Promise<AccountRunResult> {
+        if (this.executionPlan?.type === 'warmup') {
+            const plan = this.executionPlan
+            return executionContext.run({ account, isMobile: plan.platform === 'mobile' }, async () => {
+                const session = await this.browserFactory.createBrowser(account)
+                try {
+                    const page = await this.newBrowserPage(session.context)
+                    if (plan.platform === 'mobile') this.mainMobilePage = page
+                    else this.mainDesktopPage = page
+                    await runNewAccountSession(this, account, session.context, page)
+                    return { initialPoints: null, finalPoints: null, collectedPoints: null }
+                } catch (error) {
+                    this.logger.warn(this.isMobile, 'NEW-ACCOUNT-NEEDS-ACTION', 'Microsoft session did not complete; inspect authentication or service diagnostics')
+                    throw error
+                } finally {
+                    try { saveStorageState(this.config.sessionPath, account.email, this.isMobile, await session.context.storageState()) }
+                    finally {
+                        markContextClosing(session.context)
+                        await session.context.close().catch(() => {})
+                        await session.context.browser()?.close().catch(() => {})
+                    }
+                }
+            })
+        }
+        if (account.newAccountMode && (!this.executionPlan?.rewardsEligibleAt || Date.parse(this.executionPlan.rewardsEligibleAt) > Date.now()))
+            throw new Error('New account has not reached its Rewards eligibility time')
         const accountEmail = account.email
         this.logger.info('main', 'FLOW', `Starting session for ${accountEmail}`)
 
@@ -680,6 +809,11 @@ export class MicrosoftRewardsBot {
         this.fingerprintMobile = undefined
         this.fingerprintDesktop = undefined
         this.reactSnapshot = null
+        this.morePromotionsVerified = false
+        this.punchCardsVerified = false
+        this.dailySetVerified = false
+        this.readToEarnVerified = false
+        this.activities.resetWorkerTracking()
         this.reactSnapshots = { mobile: null, desktop: null }
         this.searchTopicsCache = null
 
@@ -724,7 +858,7 @@ export class MicrosoftRewardsBot {
             return await executionContext.run({ isMobile: true, account }, async () => {
                 mobileSession = await this.browserFactory.createBrowser(account)
                 const initialContext: BrowserContext = mobileSession.context
-                this.mainMobilePage = await initialContext.newPage()
+                this.mainMobilePage = await this.newBrowserPage(initialContext)
 
                 this.logger.info('main', 'BROWSER', `Mobile Browser started | ${accountEmail}`)
 
@@ -787,6 +921,11 @@ export class MicrosoftRewardsBot {
                         `Microsoft Rewards reported Fraud_UserWarning_BotScore_UX for ${accountEmail}, but contintueOnBotWarning=true. ` +
                             'Continuing as configured is not recommended; waiting a few days is the preferred action.'
                     )
+                }
+
+                if (this.executionPlan?.type === 'quota') {
+                    const points = data.dashboard.userStatus.availablePoints
+                    return { initialPoints: points, finalPoints: points, collectedPoints: 0 }
                 }
 
                 const profileCountry = normalizeCountry(data.dashboard.userProfile.attributes.country)
@@ -1006,8 +1145,6 @@ export class MicrosoftRewardsBot {
 
                 if (this.config.workers.doClaimBonusPoints) await this.activities.doClaimBonusPoints()
 
-                this.markCompletedSmartWorkers(appAvailable, data)
-
                 if (edgeBrowsingTask) {
                     if (!edgeBrowsingFinished) {
                         this.logger.info(
@@ -1096,6 +1233,22 @@ async function main(): Promise<void> {
         await flushAllWebhooks()
         process.exit(143)
     })
+    process.on('SIGUSR1', () => {
+        void rewardsBot
+            .checkpointAndCloseBrowsers()
+            .then(async () => {
+                await flushAllWebhooks()
+                process.exit(0)
+            })
+            .catch(error => {
+                rewardsBot.logger.error(
+                    'main',
+                    'SESSION-CHECKPOINT',
+                    `Could not save browser sessions: ${error instanceof Error ? error.message : String(error)}`
+                )
+                process.exit(1)
+            })
+    })
     process.on('uncaughtException', async error => {
         if (isBrowserClosedError(error)) {
             rewardsBot.logger.debug(
@@ -1133,9 +1286,11 @@ async function main(): Promise<void> {
     }
 }
 
-main().catch(async error => {
-    const tmpBot = new MicrosoftRewardsBot()
-    tmpBot.logger.error('main', 'MAIN-ERROR', error as Error)
-    await flushAllWebhooks()
-    process.exit(1)
-})
+if (require.main === module) {
+    main().catch(async error => {
+        const tmpBot = new MicrosoftRewardsBot()
+        tmpBot.logger.error('main', 'MAIN-ERROR', error as Error)
+        await flushAllWebhooks()
+        process.exit(1)
+    })
+}

@@ -5,7 +5,7 @@ import globals from 'globals'
 
 export default tseslint.config(
     {
-        ignores: ['dist/**', 'node_modules/**', 'diagnostics/**', 'sessions/**']
+        ignores: ['dist/**', 'packages/contracts/dist/**', 'releases/**', 'node_modules/**', 'diagnostics/**', 'sessions/**']
     },
     js.configs.recommended,
     ...tseslint.configs.recommended,

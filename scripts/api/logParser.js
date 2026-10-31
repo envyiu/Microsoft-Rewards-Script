@@ -1,3 +1,5 @@
+import rewards from '../../packages/contracts/rewards.cjs'
+
 const ANSI_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g')
 
 export function stripAnsi(str) {
@@ -81,6 +83,7 @@ function ensureAccount(state, email) {
             searchSummary: null, // { mobile, desktop, bonus, total }
             smartSearch: null,
             streakProtection: null, // { enabled, remainingDays, streakCounter, updatedAt }
+            rewardsStreak: null,
             reliability: {
                 balance: { status: 'unknown', source: null, readAt: null },
                 quota: { status: 'unknown', source: null, readAt: null }
@@ -447,7 +450,7 @@ export function applyLogToRunState(state, entry) {
 
         case 'SMART-SESSION': {
             const start = msg.match(
-                /^Session start \| jobId=([^|]+) \| type=(search|workers)(?: \| platform=(mobile|desktop) \| budget=(\d+)| \| workers=([^|]+))?$/
+                /^Session start \| jobId=([^|]+) \| type=(search|workers|quota)(?: \| platform=(mobile|desktop) \| budget=(\d+)| \| workers=([^|]+))?$/
             )
             const end = msg.match(/^Session end \| jobId=([^|]+) \| success=(true|false) \| durationSeconds=([\d.]+)$/)
             if (start) {
@@ -490,6 +493,16 @@ export function applyLogToRunState(state, entry) {
                 updatedAt: eventTime(entry)
             }
             return 'smart-search-end'
+        }
+
+        case 'REWARDS-STREAK': {
+            const observation = rewards.parseRewardsStreak(msg)
+            if (!observation) break
+            const acc = ensureAccount(state, observation.email)
+            if (acc && (!acc.rewardsStreak || Date.parse(observation.observedAt) > Date.parse(acc.rewardsStreak.observedAt) ||
+                (observation.observedAt === acc.rewardsStreak.observedAt && observation.status === 'fresh')))
+                acc.rewardsStreak = observation
+            return 'rewards-streak'
         }
 
         case 'REACT-PARSE':

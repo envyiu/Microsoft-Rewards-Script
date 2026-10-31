@@ -3,6 +3,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { DatabaseSync } from 'node:sqlite'
 import { accountIndexesFromEnv, envBool, envInt, envStr, normalizeGeoLocale, normalizeLanguageCode } from './env.js'
+import { createBrowserProxyConfig } from '../common/proxyRelay.cjs'
 
 export function getDirname(importMetaUrl) {
     const __filename = fileURLToPath(importMetaUrl)
@@ -134,7 +135,7 @@ export function loadJsonFile(possiblePaths, required = true) {
 }
 
 export function loadConfig(projectRoot) {
-    const possiblePaths = [
+    const possiblePaths = process.env.MRS_CONFIG_FILE ? [path.resolve(process.env.MRS_CONFIG_FILE)] : [
         path.resolve(process.cwd(), 'config.json'),
         path.join(projectRoot, 'config.json'),
         path.join(projectRoot, 'dist', 'config.json'),
@@ -157,6 +158,7 @@ export function loadConfig(projectRoot) {
 }
 
 export function loadEnvFile(projectRoot) {
+    if (process.env.MRS_SKIP_ENV_FILE === '1') return
     const candidates = [
         path.resolve(process.cwd(), '.env'),
         path.join(projectRoot, '.env'),
@@ -223,6 +225,7 @@ export function loadAccountsFromEnv(projectRoot) {
             password: envStr(`ACCOUNT_${idx}_PASSWORD`) ?? '',
             totpSecret: envStr(`ACCOUNT_${idx}_TOTP_SECRET`),
             recoveryEmail: envStr(`ACCOUNT_${idx}_RECOVERY_EMAIL`) ?? '',
+            newAccountMode: envStr(`ACCOUNT_${idx}_NEW_ACCOUNT_MODE`) === 'true',
             geoLocale: normalizeGeoLocale(envStr(`ACCOUNT_${idx}_GEO_LOCALE`) ?? 'auto'),
             langCode: normalizeLanguageCode(envStr(`ACCOUNT_${idx}_LANG_CODE`) ?? 'en'),
             proxy: {
@@ -297,19 +300,11 @@ export function buildProxyConfig(account) {
     if (hasUsername !== hasPassword) {
         throw new Error('Proxy username and password must be configured together')
     }
-    if ((url.protocol === 'socks4:' || url.protocol === 'socks5:') && (hasUsername || hasPassword)) {
-        throw new Error(
-            `${url.protocol.slice(0, -1).toUpperCase()} proxy authentication is not supported by Patchright`
-        )
+    if (url.protocol === 'socks4:' && (hasUsername || hasPassword)) {
+        throw new Error('SOCKS4 proxy authentication is not supported')
     }
 
-    const proxy = { server: `${url.protocol}//${url.hostname}:${settings.port}` }
-    if (hasUsername && hasPassword) {
-        proxy.username = settings.username
-        proxy.password = settings.password
-    }
-
-    return proxy
+    return createBrowserProxyConfig(settings)
 }
 
 export function setupCleanupHandlers(cleanupFn) {

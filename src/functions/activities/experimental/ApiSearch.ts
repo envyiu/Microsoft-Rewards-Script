@@ -1,3 +1,4 @@
+import { waitForSearch } from '../../../util/ActivityTiming'
 import { SearchQueryQueue } from '../../SearchQueryQueue'
 import { BaseActivity } from '../BaseActivity'
 import { BonusTracker } from '../search/BonusTracker'
@@ -191,7 +192,8 @@ export class ApiSearch extends BaseActivity {
                     break
                 }
 
-                await this.bot.utils.wait(
+                await waitForSearch(
+                    this.bot,
                     this.bot.utils.randomDelay(
                         this.bot.config.searchSettings.searchDelay.min,
                         this.bot.config.searchSettings.searchDelay.max
@@ -281,7 +283,8 @@ export class ApiSearch extends BaseActivity {
                     )
                 }
 
-                await this.bot.utils.wait(
+                await waitForSearch(
+                    this.bot,
                     this.bot.utils.randomDelay(
                         this.bot.config.searchSettings.searchDelay.min,
                         this.bot.config.searchSettings.searchDelay.max

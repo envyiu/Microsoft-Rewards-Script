@@ -33,14 +33,14 @@ function unknownPageOutputDir(rawUrl: string, capturedAt: string, platform: stri
     const urlFolder = `${pathname}-${urlHash}`
     const captureFolder = `${capturedAt.replace(/[:.]/g, '-')}-${platform}`
 
-    return path.join(process.cwd(), 'diagnostics', 'unknown-login-pages', hostname, urlFolder, captureFolder)
+    return path.join(process.env.API_DIAGNOSTICS_DIR || path.join(process.cwd(), 'diagnostics'), 'unknown-login-pages', hostname, urlFolder, captureFolder)
 }
 
 export async function errorDiagnostic(page: Page, error: Error): Promise<void> {
     try {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
         const folderName = `error-${timestamp}`
-        const outputDir = path.join(process.cwd(), 'diagnostics', folderName)
+        const outputDir = path.join(process.env.API_DIAGNOSTICS_DIR || path.join(process.cwd(), 'diagnostics'), folderName)
 
         if (!page) {
             return

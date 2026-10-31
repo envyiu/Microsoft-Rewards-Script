@@ -119,7 +119,7 @@ export class ProcessManager extends EventEmitter {
         return { pid: this.pid, startedAt: this.startedAt, command: this.command, args }
     }
 
-    stop({ force = false } = {}) {
+    stop({ force = false, signalTree = true, signal = 'SIGTERM' } = {}) {
         if (this.state === 'idle') {
             const err = new Error('Cannot stop: no run is in progress.')
             err.code = 'NOT_RUNNING'
@@ -129,9 +129,13 @@ export class ProcessManager extends EventEmitter {
         const wasStopping = this.state === 'stopping'
         this.state = 'stopping'
         if (!wasStopping) {
-            this._controllerLog('warn', force ? 'Force-stopping run (SIGKILL)…' : 'Stopping run (SIGTERM)…')
+            this._controllerLog('warn', force ? 'Force-stopping run (SIGKILL)…' : `Stopping run (${signal})…`)
             this._emitStatus('stopping')
-            this._killTree(force ? 'SIGKILL' : 'SIGTERM')
+            if (force || signalTree) {
+                this._killTree(force ? 'SIGKILL' : signal)
+            } else {
+                this.child?.kill(signal)
+            }
 
             this._killTimer = setTimeout(() => {
                 if (this.state !== 'idle') {
@@ -163,10 +167,21 @@ export class ProcessManager extends EventEmitter {
         return this.start(overrides)
     }
 
+    isAlive() {
+        if (!this.pid || !this.child || this.child.exitCode !== null || this.child.signalCode !== null) return false
+        try {
+            process.kill(this.pid, 0)
+            return true
+        } catch (error) {
+            return error.code === 'EPERM'
+        }
+    }
+
     getStatus() {
         return {
             name: this.name,
             version: this.version,
+            alive: this.isAlive(),
             state: this.state,
             pid: this.pid,
             startedAt: this.state === 'idle' ? null : this.startedAt,
@@ -190,6 +205,7 @@ export class ProcessManager extends EventEmitter {
             bySource: a.live.bySource,
             earnable: a.earnable,
             streakProtection: a.streakProtection,
+            rewardsStreak: a.rewardsStreak,
             edgeBrowsing: a.edgeBrowsing,
             done: a.success != null,
             success: a.success,
