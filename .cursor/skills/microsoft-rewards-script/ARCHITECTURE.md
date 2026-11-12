@@ -144,7 +144,7 @@ Authentication methods live under `src/browser/auth/methods/`:
 - `Totp2FA` generates OTPAuth codes or requests interactive input.
 - `GetACodeLogin` handles email-code entry.
 - `RecoveryEmailLogin` handles recovery addresses/codes.
-- `MobileAccessLogin` obtains the app OAuth token through the browser/request path.
+- `MobileAccessLogin` obtains the app OAuth token through the browser/request path. Explicit app-auth challenges emit a redacted `LOGIN-APP` user-action reason; Smart blocks only the three incomplete app workers for that account/day, without treating web login/search as failed. See [app authorization recovery](../../../docs/APP_AUTHORIZATION_VI.md).
 
 Login checks the Rewards earn page first when the browser already has authentication cookies; fresh sessions retain the explicit login route. An unrecognized Rewards `/auth/login` page gets one earn-page recovery, and the auth route or tracking cookies alone cannot establish login success.
 

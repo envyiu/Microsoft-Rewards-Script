@@ -6,6 +6,39 @@ import { URLs } from '../../../constants/urls'
 import type { MicrosoftRewardsBot } from '../../../index'
 import { isAccountReviewUrl, safeAuthorizationLocation } from '../AuthorizationRoute'
 
+export async function appAuthorizationBlockReason(page: Page): Promise<string | null> {
+    const url = new URL(page.url())
+    if (isAccountReviewUrl(url.href)) return 'account-review'
+    if (url.hostname !== 'login.live.com') return null
+    if (url.searchParams.get('error') === 'access_denied') return 'access-denied'
+    if (
+        await page
+            .locator('input[name="otc"], [data-testid="codeEntry"], [data-testid="codeInputWrapper"]')
+            .first()
+            .isVisible()
+            .catch(() => false)
+    )
+        return 'email-code-required'
+    // Inspect controls only. Never log page text, proof destinations or account identifiers.
+    if (
+        await page
+            .getByRole('button', { name: /^send (?:a )?code$/i })
+            .first()
+            .isVisible()
+            .catch(() => false)
+    )
+        return 'email-code-required'
+    if (
+        await page
+            .locator('input[type="password"]')
+            .first()
+            .isVisible()
+            .catch(() => false)
+    )
+        return 'password-required'
+    return null
+}
+
 interface TokenResponse {
     access_token?: string
     error?: string
@@ -18,6 +51,7 @@ export class MobileAccessLogin {
     private redirectUrl = URLs.auth.oauthRedirect
     private tokenUrl = URLs.auth.oauthToken
     private authorizationNeedsReview = false
+    private authorizationActionRequired = false
     private scope = 'service::prod.rewardsplatform.microsoft.com::MBI_SSL'
 
     constructor(
@@ -27,6 +61,7 @@ export class MobileAccessLogin {
 
     async get(email: string): Promise<string> {
         this.authorizationNeedsReview = false
+        this.authorizationActionRequired = false
         try {
             const authorizeUrl = new URL(this.authUrl)
             authorizeUrl.searchParams.append('response_type', 'code')
@@ -59,7 +94,9 @@ export class MobileAccessLogin {
                     'LOGIN-APP',
                     this.authorizationNeedsReview
                         ? 'Mobile OAuth encountered an account-review redirect and browser authorization did not complete; app activities remain pending'
-                        : 'Could not resolve mobile OAuth code - app activities will be retried by the scheduler'
+                        : this.authorizationActionRequired
+                          ? 'App authorization is waiting for user action; app activities remain pending'
+                          : 'Could not resolve mobile OAuth code - app activities will be retried by the scheduler'
                 )
                 return ''
             }
@@ -145,6 +182,17 @@ export class MobileAccessLogin {
             let code = this.extractCode(oauthPage.url())
             if (code) return code
 
+            const blocked = await appAuthorizationBlockReason(oauthPage)
+            if (blocked) {
+                this.authorizationActionRequired = true
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'LOGIN-APP',
+                    `App authorization needs user action | reason=${blocked}`
+                )
+                return ''
+            }
+
             await oauthPage
                 .waitForURL(
                     url => url.pathname.toLowerCase() === '/oauth20_desktop.srf' || isAccountReviewUrl(url.href),
@@ -159,6 +207,17 @@ export class MobileAccessLogin {
             )
             if (this.reviewRequired(oauthPage.url())) return ''
             code = this.extractCode(oauthPage.url())
+            if (!code) {
+                const blocked = await appAuthorizationBlockReason(oauthPage)
+                if (blocked) {
+                    this.authorizationActionRequired = true
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'LOGIN-APP',
+                        `App authorization needs user action | reason=${blocked}`
+                    )
+                }
+            }
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'LOGIN-APP',
@@ -181,6 +240,12 @@ export class MobileAccessLogin {
     private reviewRequired(rawUrl: string): boolean {
         if (!isAccountReviewUrl(rawUrl)) return false
         this.authorizationNeedsReview = true
+        this.authorizationActionRequired = true
+        this.bot.logger.warn(
+            this.bot.isMobile,
+            'LOGIN-APP',
+            'App authorization needs user action | reason=account-review'
+        )
         this.bot.logger.warn(
             this.bot.isMobile,
             'LOGIN-APP',
@@ -192,7 +257,8 @@ export class MobileAccessLogin {
     private extractCode(rawUrl: string): string {
         try {
             const url = new URL(rawUrl)
-            if (url.pathname.toLowerCase() !== '/oauth20_desktop.srf') return ''
+            if (url.origin !== 'https://login.live.com' || url.pathname.toLowerCase() !== '/oauth20_desktop.srf')
+                return ''
             return url.searchParams.get('code') ?? ''
         } catch {
             return ''

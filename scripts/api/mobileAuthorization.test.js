@@ -129,6 +129,8 @@ test('browser OAuth fallback detects a late review redirect and closes only the 
     const oauth = {
         goto: async () => {},
         url: () => current,
+        locator: () => ({ first: () => ({ isVisible: async () => false }) }),
+        getByRole: () => ({ first: () => ({ isVisible: async () => false }) }),
         waitForURL: async predicate => {
             current = 'https://account.live.com/Abuse'
             assert.equal(predicate(new URL(current)), true)
@@ -358,4 +360,34 @@ test('generic Rewards content, public offers and a default header balance cannot
     const login = new Login(bot)
     login.checkSelector = async () => false
     assert.equal(await login.detectCurrentState(page), 'UNKNOWN')
+})
+
+for (const [selector, expected] of [['send-code', 'email-code-required'], ['password', 'password-required']]) {
+    test(`OAuth stops promptly for ${expected} without sending codes or exposing proof details`, async () => {
+        const { bot, messages } = fixture()
+        let closed = false, waited = false
+        const invisible = { first: () => ({ isVisible: async () => false }) }
+        const oauth = {
+            goto: async () => {}, url: () => 'https://login.live.com/oauth20_authorize.srf',
+            locator: value => value === 'input[type="password"]' && selector === 'password' ? { first: () => ({ isVisible: async () => true }) } : invisible,
+            getByRole: () => ({ first: () => ({ isVisible: async () => selector === 'send-code' }) }),
+            waitForURL: async () => { waited = true }, close: async () => { closed = true }
+        }
+        bot.newBrowserPage = async () => oauth
+        const page = { context: () => ({}), request: { get: async () => ({ url: oauth.url, status: () => 200 }) } }
+        assert.equal(await new MobileAccessLogin(bot, page).get('one@example.test'), '')
+        assert.equal(closed, true)
+        assert.equal(waited, false)
+        assert.ok(messages.some(m => m.message === `App authorization needs user action | reason=${expected}`))
+        assert.ok(!JSON.stringify(messages).includes('one@example.test'))
+    })
+}
+test('OAuth code lookalikes on another host are never exchanged', async () => {
+    const { bot } = fixture()
+    let exchanged = false
+    bot.http = { request: async () => { exchanged = true; return { data: {} } } }
+    bot.newBrowserPage = async () => ({ goto: async () => {}, url: () => 'https://example.test/oauth20_desktop.srf?code=private', locator: () => ({ first: () => ({ isVisible: async () => false }) }), getByRole: () => ({ first: () => ({ isVisible: async () => false }) }), waitForURL: async () => {}, close: async () => {} })
+    const page = { context: () => ({}), request: { get: async () => ({ url: () => 'https://example.test/oauth20_desktop.srf?code=private', status: () => 200 }) } }
+    assert.equal(await new MobileAccessLogin(bot, page).get('one@example.test'), '')
+    assert.equal(exchanged, false)
 })

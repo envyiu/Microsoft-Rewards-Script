@@ -1111,3 +1111,26 @@ test('manual Stop cooldown blocks Urgent and force drain, then resumes at the ne
     scheduler.replan()
     assert.ok(started.length > 0)
 })
+
+test('explicit app authorization blocks all shared app tasks while ordinary browser work stays schedulable', t => {
+    const { scheduler, account } = planningFixture(t, {
+        allowedWorkers: ['dailySet', 'readToEarn', 'dailyCheckIn', 'appPromotions']
+    })
+    scheduler.suspended = true
+    scheduler.replan()
+    scheduler._drain = () => {}
+    scheduler.suspended = false
+    const state = scheduler.document.state.accounts[String(account.index)]
+    const day = state.day
+    scheduler._finish({
+        job: { id: 'app-auth', day, accountIndex: account.index, type: 'workers', workers: ['readToEarn'] },
+        manager: { getStatus: () => ({ run: { accounts: [{ success: true }] } }) },
+        workerResults: new Set(), startedAt: new Date().toISOString(),
+        appAuthorization: { required: true, reason: 'email-code-required' }
+    }, { code: 0 })
+    assert.equal(state.appAuthorization.reason, 'email-code-required')
+    assert.deepEqual(state.workersFailed.sort(), ['appPromotions', 'dailyCheckIn', 'readToEarn'])
+    assert.ok(!state.workersCompleted.includes('readToEarn'))
+    assert.ok(scheduler.queue.some(job => job.workers?.includes('dailySet')))
+    assert.ok(!scheduler.queue.some(job => job.workers?.some(w => ['readToEarn', 'dailyCheckIn', 'appPromotions'].includes(w))))
+})

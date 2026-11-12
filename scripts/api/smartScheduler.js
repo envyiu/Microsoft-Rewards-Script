@@ -4,6 +4,7 @@ import crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
 
 import { ProcessManager } from './processManager.js'
+import { captureAppAuthorization, applyAppAuthorization } from './appAuthorization.js'
 import { buildSingleAccountEnv, loadAccounts } from './accounts.js'
 import { parseSearchQuotaSnapshot, reconcileSearchQuota } from './searchQuotaSnapshot.js'
 import { preRewardsActive, newAccountStatus, NEW_ACCOUNT_DURATION_MS, NEW_ACCOUNT_SERVICES, NEW_ACCOUNT_QUERIES } from '../../packages/contracts/newAccount.js'
@@ -1030,6 +1031,8 @@ export class SmartScheduler extends EventEmitter {
         }
         this.running.set(job.id, record)
         manager.on('log', entry => {
+            const appAuthorization = captureAppAuthorization(entry)
+            if (appAuthorization) record.appAuthorization = appAuthorization
             if (entry.title?.startsWith('LOGIN'))
                 record.phase = /verif|approval|code/i.test(entry.message) ? 'verification' : 'login'
             if (entry.title === 'SMART-WORKER-START' || entry.title === 'SMART-SEARCH-START') record.phase = job.type
@@ -1274,6 +1277,7 @@ export class SmartScheduler extends EventEmitter {
                     })
             }
         }
+        applyAppAuthorization(state, record)
         this._save()
         this.replan()
         this.emit('change', this.get())
