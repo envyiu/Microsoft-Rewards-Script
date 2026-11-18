@@ -23,6 +23,7 @@ export function loadAccounts(sourceEnv = process.env) {
             index: i,
             email,
             newAccountMode: envStrFrom(sourceEnv, `ACCOUNT_${i}_NEW_ACCOUNT_MODE`) === 'true',
+            newAccountPolicy: envStrFrom(sourceEnv, `ACCOUNT_${i}_NEW_ACCOUNT_POLICY`) || 'standard168h',
             emailKey: email, // internal history join key; removed before returning the response
             hasPassword: Boolean(envStrFrom(sourceEnv, `ACCOUNT_${i}_PASSWORD`)),
             geoLocale: normalizeGeoLocale(envStrFrom(sourceEnv, `ACCOUNT_${i}_GEO_LOCALE`) ?? 'auto'),

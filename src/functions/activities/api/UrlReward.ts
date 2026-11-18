@@ -98,16 +98,20 @@ export class UrlReward extends BaseActivity {
             if (balance !== null) this.bot.userData.currentPoints = balance
             if (gained !== null && gained > 0)
                 this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
-            const message = `offerId=${offerId} | acknowledged=true | expected=${expectedPoints}` +
+            const message =
+                `offerId=${offerId} | acknowledged=true | expected=${expectedPoints}` +
                 ` | pointsGained=${gained ?? 'unknown'} | currentBalance=${balance ?? 'unknown'}` +
                 ` | completionVerified=${complete} | creditVerified=${gained !== null}`
             if (complete) {
-                this.bot.logger.info(this.bot.isMobile, 'URL-REWARD',
-                    `Completed UrlReward | ${message}`, gained !== null && gained > 0 ? 'green' : undefined)
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'URL-REWARD',
+                    `Completed UrlReward | ${message}`,
+                    gained !== null && gained > 0 ? 'green' : undefined
+                )
             } else {
                 this.bot.logger.warn(this.bot.isMobile, 'URL-REWARD', `UrlReward completion unverified | ${message}`)
             }
-
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,

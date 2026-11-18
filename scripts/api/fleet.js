@@ -10,33 +10,24 @@ import { loadAccounts } from './accounts.js'
 import { deriveNetworkGroup, validateSmartConfig } from './smartScheduler.js'
 import { readConfig, deepMerge, validateConfig } from './configEditor.js'
 import { exportAccountSession, importAccountSession } from './sessionStore.js'
-import { redactSecrets } from './lib.js'
 import { nodeResources } from './nodeResources.js'
+import {
+    WORKER_PROTOCOL,
+    ACCOUNT_KEY,
+    assertCompatible,
+    workerCapabilities
+} from '../../packages/contracts/protocol.js'
 import { NodeProvisioner } from './nodeProvisioner.js'
+import { handleFleetNodeRoutes } from './routes/nodes.js'
 
 const compress = promisify(gzip)
-const accountKey =
-    /^ACCOUNT_[1-9]\d*_(EMAIL|PASSWORD|TOTP_SECRET|RECOVERY_EMAIL|GEO_LOCALE|LANG_CODE|PROXY_(URL|PORT|USERNAME|PASSWORD|HTTP|AXIOS)|SAVE_FINGERPRINT_(MOBILE|DESKTOP))$/
+const isSupportedProtocol = version => version === WORKER_PROTOCOL || version === 2
 const clone = value => structuredClone(value)
-const redactSettings = value => ({ ...clone(value), ...(value.bot ? { bot: redactSecrets(value.bot) } : {}) })
-const managedBotKeys = ['sessionPath', 'clusters']
 function fail(message, code = 'BAD_REQUEST', status = 400) {
     throw Object.assign(new Error(message), { code, status })
 }
 function hash(value) {
     return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex')
-}
-function restoreRedacted(value, previous) {
-    if (value === '***REDACTED***') return previous
-    if (Array.isArray(value)) return value.map((v, i) => restoreRedacted(v, previous?.[i]))
-    if (value && typeof value === 'object')
-        return Object.fromEntries(
-            Object.entries(value).map(([k, v]) => {
-                if (['__proto__', 'constructor', 'prototype'].includes(k)) fail('Unsafe configuration key.')
-                return [k, restoreRedacted(v, previous?.[k])]
-            })
-        )
-    return value
 }
 
 export class Fleet extends Hybrid {
@@ -213,11 +204,13 @@ export class Fleet extends Hybrid {
         )
         const value = this.effective(id)
         const accountEnv = Object.fromEntries(
-            Object.entries(this.env).filter(([key]) => accountKey.test(key) && indexes.has(Number(key.split('_')[1])))
+            Object.entries(this.env).filter(([key]) => ACCOUNT_KEY.test(key) && indexes.has(Number(key.split('_')[1])))
         )
         const schedule = clone(value.schedule)
         schedule.profiles = schedule.profiles.filter(p => indexes.has(p.accountIndex))
-        const content = { protocolVersion: 2, accountEnv, botConfig: value.bot, schedule }
+        const remoteProtocol = this.states.get(id)?.remote?.protocolVersion ?? this.node(id)?.protocolVersion
+        const protocolVersion = remoteProtocol === 2 ? 2 : WORKER_PROTOCOL
+        const content = { protocolVersion, accountEnv, botConfig: value.bot, schedule }
         const revision = hash(content)
         let desired = this.store.get(`node:${id}:desired`)
         if (desired?.revision !== revision) {
@@ -286,11 +279,19 @@ export class Fleet extends Hybrid {
                     this.save()
                 } else fail('Machine identity does not match the registered node.', 'NODE_IDENTITY', 409)
             }
-            if (remote.protocolVersion !== 2)
-                fail('Upgrade this machine runtime before applying fleet settings.', 'UPGRADE_REQUIRED', 409)
+            if (!isSupportedProtocol(remote.protocolVersion)) assertCompatible(remote)
             state.remote = remote
             state.observedAt = new Date().toISOString()
             const snapshot = this.snapshot(node.id)
+            if (
+                snapshot.schedule.normalPolicy?.enabled !== false &&
+                remote.capabilities?.conservativeSessionsV1 !== true
+            )
+                fail('Upgrade machine for conservative account sessions.', 'UPGRADE_REQUIRED', 409)
+            if (snapshot.schedule.streakSearchV1 && remote.capabilities?.streakSearchV1 !== true)
+                fail('Upgrade machine for streak-based search.', 'UPGRADE_REQUIRED', 409)
+            if (snapshot.schedule.dailySearchLimits && remote.capabilities?.dailySearchLimitsV1 !== true)
+                fail('Upgrade machine for daily search limits.', 'UPGRADE_REQUIRED', 409)
             if (
                 snapshot.revision !== remote.revision ||
                 remote.syncPending ||
@@ -520,7 +521,10 @@ export class Fleet extends Hybrid {
             if (this.transfers[a.index] || this.operationFor(a.index) || this.manual.hasAccount(a.index))
                 fail('A selected group has a manual session or pending transfer.', 'ACCOUNT_HELD', 409)
         for (const id of new Set([target, ...members.map(a => this.owner(a))]))
-            if (id !== 'local' && (this.states.get(id)?.remote?.protocolVersion || this.node(id).protocolVersion) !== 2)
+            if (
+                id !== 'local' &&
+                !isSupportedProtocol(this.states.get(id)?.remote?.protocolVersion || this.node(id).protocolVersion)
+            )
                 fail('Upgrade the selected machine before moving accounts.', 'UPGRADE_REQUIRED', 409)
         return members.map(a => ({
             index: a.index,
@@ -701,6 +705,11 @@ export class Fleet extends Hybrid {
                 id: n.id,
                 name: n.name,
                 kind: n.kind,
+                protocolVersion: local
+                    ? WORKER_PROTOCOL
+                    : (s?.remote?.protocolVersion ?? n.protocolVersion ?? WORKER_PROTOCOL),
+                legacyProtocol: !local && (s?.remote?.protocolVersion ?? n.protocolVersion) === 2,
+                capabilities: local ? workerCapabilities('local', this.env) : s?.remote?.capabilities || {},
                 ssh: n.ssh ? { host: n.ssh.host, port: n.ssh.port, user: n.ssh.user } : null,
                 online: local || Boolean(s?.online),
                 resources: local ? nodeResources() : s?.remote?.resources || null,
@@ -721,7 +730,9 @@ export class Fleet extends Hybrid {
                     : !s?.online
                       ? 'offline'
                       : s.error
-                        ? 'error'
+                        ? s.error === 'UPGRADE_REQUIRED'
+                            ? 'UPGRADE_REQUIRED'
+                            : 'error'
                         : s.remote?.revision !== this.snapshot(n.id).revision || s.remote?.syncPending
                           ? 'pending'
                           : 'applied',
@@ -845,300 +856,6 @@ export class Fleet extends Hybrid {
             fail('Finish transfers before changing network groups.', 'ACCOUNT_HELD', 409)
     }
     async handle(req, res, url, io) {
-        const route = url.pathname.replace(/\/+$/, ''),
-            method = req.method
-        const reply = (status, data) => {
-            io.send(res, status, data)
-            return true
-        }
-        try {
-            if (
-                method !== 'GET' &&
-                /^\/accounts(?:\/\d+)?$/.test(route) &&
-                this.operations.some(o => o.kind === 'assignment' && o.phase !== 'done')
-            )
-                fail('Finish machine transfers before editing account identities or proxies.', 'ACCOUNT_HELD', 409)
-            if (route === '/fleet-scheduler' && method === 'POST') {
-                if (!this.permissions.schedule) return reply(403, { error: 'Schedule writes disabled.' })
-                const body = await io.read(req)
-                if (typeof body.enabled !== 'boolean') fail('enabled must be boolean.')
-                for (const n of this.registry.nodes)
-                    n.overrides = deepMerge(n.overrides, { schedule: { enabled: body.enabled } })
-                this.save()
-                void this.sync()
-                return reply(202, { saved: true, status: 'pending' })
-            }
-            if (['POST', 'PATCH', 'DELETE'].includes(method) && /^\/accounts(?:\/\d+)?$/.test(route))
-                res.once('finish', () => {
-                    if (res.statusCode >= 300) return
-                    this.registry.defaults.schedule.profiles = clone(this.scheduler.document.config.profiles)
-                    this.save()
-                    queueMicrotask(() => void this.sync())
-                })
-            const nodeRoute = /^\/nodes\/([^/]+)(?:\/(config|resources|retry|trust))?$/.exec(route)
-            const stopAccount = /^\/smart-schedule\/accounts\/([1-9]\d*)\/stop$/.exec(route)
-            if (stopAccount && method === 'POST') {
-                if (!this.permissions.schedule) return reply(403, { error: 'Schedule writes disabled.' })
-                const index = Number(stopAccount[1])
-                this.account(index)
-                const body = await io.read(req)
-                const owner = this.owner(index)
-                if (owner === 'local') return reply(200, await this.scheduler.stopAccount(index, body.jobId))
-                const status = this.states.get(owner)
-                if (!runtimeFresh({ online: status?.online, observedAt: status?.observedAt }))
-                    fail('Machine runtime cannot be verified. Refresh and retry.', 'RUNTIME_UNKNOWN', 503)
-                const result = await this.call('/internal/hybrid/control', 'POST', { route, body }, 60000, owner)
-                await this.syncNode(this.node(owner))
-                return reply(200, result.result)
-            }
-            if (
-                route === '/nodes' ||
-                nodeRoute ||
-                route === '/execution-config/defaults' ||
-                route.startsWith('/account-assignments') ||
-                route.startsWith('/node-operations') ||
-                route === '/nodes/ssh-keys'
-            ) {
-                if (method !== 'GET' && (!this.permissions.config || !this.permissions.schedule))
-                    return reply(403, { error: 'Configuration and schedule writes are required.' })
-                if (route === '/nodes/ssh-keys' && method === 'GET')
-                    return reply(200, { keys: this.provisioner.keys() })
-                if (route === '/nodes' && method === 'GET')
-                    return reply(200, {
-                        nodes: this.nodesView(),
-                        operations: this.operations.map(o => this.publicOperation(o)).slice(-100)
-                    })
-                if (route === '/nodes' && method === 'POST')
-                    return reply(202, {
-                        operation: this.publicOperation(await this.provisioner.add(await io.read(req)))
-                    })
-                if (route === '/execution-config/defaults') {
-                    if (method === 'GET')
-                        return reply(200, { config: redactSettings(this.registry.defaults), managedBotKeys })
-                    if (method === 'PUT') {
-                        const value = restoreRedacted(await io.read(req), this.registry.defaults)
-                        for (const key of managedBotKeys)
-                            if (value.bot?.[key] !== this.registry.defaults.bot[key])
-                                fail(`${key} is managed by the runtime.`)
-                        await this.validateSettings(value)
-                        // A default change must also validate every inherited effective configuration.
-                        for (const n of this.registry.nodes) await this.validateSettings(deepMerge(value, n.overrides))
-                        this.registry.defaults = value
-                        this.save()
-                        void this.sync()
-                        return reply(202, { saved: true, status: 'pending' })
-                    }
-                }
-                if (nodeRoute) {
-                    const id = decodeURIComponent(nodeRoute[1]),
-                        action = nodeRoute[2],
-                        n = this.node(id)
-                    if (action === 'config') {
-                        if (method === 'GET')
-                            return reply(200, {
-                                overrides: redactSettings(n.overrides),
-                                effective: redactSettings(this.effective(id)),
-                                defaults: redactSettings(this.registry.defaults),
-                                managedBotKeys: [...managedBotKeys, ...(id !== 'local' ? ['headless'] : [])]
-                            })
-                        if (method === 'PUT') {
-                            const value = restoreRedacted(await io.read(req), n.overrides)
-                            for (const key of [...managedBotKeys, ...(id !== 'local' ? ['headless'] : [])])
-                                if (Object.hasOwn(value.bot || {}, key)) fail(`${key} is managed by the runtime.`)
-                            if (value.schedule?.profiles || value.schedule?.networkGroupOverride)
-                                fail('Account profiles and network groups are shared settings.')
-                            await this.validateSettings(deepMerge(this.registry.defaults, value))
-                            n.overrides = value
-                            this.save()
-                            void this.sync()
-                            return reply(202, { saved: true, status: 'pending' })
-                        }
-                    }
-                    if (action === 'resources' && method === 'GET')
-                        return reply(200, { resources: this.nodesView().find(x => x.id === id).resources })
-                    if (!action && method === 'PATCH') {
-                        const body = await io.read(req)
-                        if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 80)
-                            fail('Name must be 1–80 characters.')
-                        n.name = body.name.trim()
-                        this.save()
-                        return reply(200, { saved: true })
-                    }
-                    if (!action && method === 'DELETE') {
-                        if (
-                            id === 'local' ||
-                            this.accounts().some(a => this.owner(a) === id) ||
-                            this.operations.some(
-                                o => o.phase !== 'done' && (o.target === id || o.members?.some(m => m.source === id))
-                            ) ||
-                            Object.values(this.transfers).some(t => t.sourceNode === id)
-                        )
-                            fail(
-                                'Move all accounts and finish transfers before removing this machine.',
-                                'NODE_BUSY',
-                                409
-                            )
-                        await this.provisioner.remove(n)
-                        this.registry.nodes = this.registry.nodes.filter(x => x.id !== id)
-                        this.save()
-                        return reply(200, { removed: true })
-                    }
-                }
-                const operation = /^\/node-operations\/([a-f0-9-]+)(?:\/(retry|trust|cancel))?$/.exec(route)
-                if (operation) {
-                    const op = this.operations.find(o => o.id === operation[1])
-                    if (!op) fail('Operation not found.', 'NOT_FOUND', 404)
-                    if (method === 'GET') return reply(200, { operation: this.publicOperation(op) })
-                    if (method === 'POST' && operation[2]) {
-                        const body = await io.read(req)
-                        if (operation[2] === 'cancel') {
-                            if (op.kind === 'assignment') await this.cancelMove(op)
-                            else await this.provisioner.cancel(op)
-                        } else if (op.kind === 'install') await this.provisioner.resume(op, operation[2], body)
-                        else {
-                            if (body.now) op.now = true
-                            op.status = 'pending'
-                            this.saveOperations()
-                            void this.sync()
-                        }
-                        return reply(202, { operation: this.publicOperation(op) })
-                    }
-                }
-                if (route === '/account-assignments/preview' && method === 'POST') {
-                    const b = await io.read(req)
-                    return reply(200, { accounts: this.preview(b.accountIndexes, b.targetNodeId) })
-                }
-                if (route === '/account-assignments' && method === 'GET')
-                    return reply(200, {
-                        assignments: this.registry.assignments,
-                        operations: this.operations
-                            .filter(o => o.kind === 'assignment')
-                            .map(o => this.publicOperation(o))
-                    })
-                if (route === '/account-assignments' && method === 'POST')
-                    return reply(202, { operation: this.createMove(await io.read(req)) })
-                return reply(405, { error: 'Method not allowed.' })
-            }
-            if (method === 'PUT' && route === '/smart-schedule') {
-                if (!this.permissions.schedule) return reply(403, { error: 'Schedule writes disabled.' })
-                const b = await io.read(req)
-                await this.validateSettings({ bot: this.registry.defaults.bot, schedule: b })
-                this.registry.defaults.schedule = validateSmartConfig(b, this.accounts())
-                this.save()
-                void this.sync()
-                return reply(202, { ...this.decorateSmart(this.scheduler.get()), writable: true })
-            }
-            if (['PUT', 'PATCH'].includes(method) && route === '/config') {
-                if (!this.permissions.config) return reply(403, { error: 'Configuration writes disabled.' })
-                const patch = restoreRedacted(await io.read(req), this.effective('local').bot)
-                const b = method === 'PATCH' ? deepMerge(this.effective('local').bot, patch) : patch
-                for (const key of managedBotKeys)
-                    if (b[key] !== this.effective('local').bot[key]) fail(`${key} is managed by the runtime.`)
-                await this.validateSettings({ bot: b, schedule: this.effective('local').schedule })
-                for (const key of managedBotKeys) delete b[key]
-                this.node('local').overrides.bot = b
-                this.save()
-                void this.sync()
-                return reply(202, { saved: true, status: 'pending' })
-            }
-            if (
-                method === 'POST' &&
-                [
-                    '/start',
-                    '/restart',
-                    '/stop',
-                    '/smart-schedule/urgent',
-                    '/smart-schedule/replan',
-                    '/smart-schedule/retry'
-                ].includes(route)
-            ) {
-                if (!this.permissions.schedule) return reply(403, { error: 'Schedule writes disabled.' })
-                const b = await io.read(req)
-                if (b.args != null || b.env != null || b.excludedAccountIndexes != null)
-                    fail('Fleet mode requires Smart Scheduler.')
-                if (route.endsWith('/urgent') && typeof b.enabled !== 'boolean') fail('enabled must be boolean.')
-                if (b.accountIndex != null) this.account(Number(b.accountIndex))
-                if (route.endsWith('/retry')) {
-                    if (b.preempt != null && typeof b.preempt !== 'boolean')
-                        fail('preempt must be boolean.', 'BAD_REQUEST', 400)
-                    if (
-                        !Array.isArray(b.accountIndexes) ||
-                        !b.accountIndexes.length ||
-                        b.accountIndexes.some(index => !Number.isSafeInteger(index))
-                    )
-                        fail('Select valid account indexes.', 'BAD_REQUEST', 400)
-                    for (const index of b.accountIndexes) this.account(index)
-                }
-                const ids = route.endsWith('/retry')
-                    ? [...new Set(b.accountIndexes.map(index => this.owner(index)))]
-                    : b.accountIndex == null
-                      ? this.registry.nodes.map(n => n.id)
-                      : [this.owner(Number(b.accountIndex))]
-                const results = await Promise.all(
-                    ids.map(async id => {
-                        try {
-                            const nodeBody = route.endsWith('/retry')
-                                ? {
-                                      ...b,
-                                      accountIndexes: b.accountIndexes.filter(index => this.owner(index) === id)
-                                  }
-                                : b
-                            if (id !== 'local')
-                                await this.call(
-                                    '/internal/hybrid/control',
-                                    'POST',
-                                    { route, body: nodeBody },
-                                    60000,
-                                    id
-                                )
-                            else if (route.endsWith('/retry'))
-                                await this.scheduler.retryAccounts(nodeBody.accountIndexes, {
-                                    preempt: nodeBody.preempt
-                                })
-                            else if (route.endsWith('/urgent')) {
-                                this.scheduler.setUrgent(b.enabled)
-                                const run = this.scheduler.document.state.urgentRun
-                                if (run?.targets)
-                                    run.targets = Object.fromEntries(
-                                        Object.entries(run.targets).filter(([i]) => this.owner(Number(i)) === 'local')
-                                    )
-                                this.scheduler._save()
-                                this.scheduler.replan()
-                            } else if (route.endsWith('/replan')) this.scheduler.replan(b)
-                            else if (route === '/stop') await this.scheduler.stop()
-                            else {
-                                if (route === '/restart') await this.scheduler.stop()
-                                this.scheduler.trigger(b.accountIndex == null ? null : [Number(b.accountIndex)], {
-                                    force: true
-                                })
-                            }
-                            return { nodeId: id, applied: true }
-                        } catch (e) {
-                            return { nodeId: id, applied: false, error: e.code || 'NODE_ERROR' }
-                        }
-                    })
-                )
-                return reply(results.some(r => !r.applied) ? 503 : 202, {
-                    results,
-                    ...this.decorateSmart(this.scheduler.get())
-                })
-            }
-            if (method === 'POST' && route === '/manual-sessions') {
-                // Base handler stores the handoff before calling the owner; reject active assignment groups.
-                const original = io.read
-                const body = await original(req)
-                if (this.operationFor(Number(body.accountIndex)))
-                    fail('Wait for the machine transfer before opening a manual browser.', 'ACCOUNT_HELD', 409)
-                const transfer = this.transfers[body.accountIndex]
-                if (transfer && !transfer.sourceNode) transfer.sourceNode = this.owner(Number(body.accountIndex))
-                return super.handle(req, res, url, { ...io, read: async () => body })
-            }
-            return super.handle(req, res, url, io)
-        } catch (error) {
-            return reply(error.status || (error.code === 'BAD_REQUEST' ? 400 : 500), {
-                error: error.status || error.code === 'BAD_REQUEST' ? error.message : 'Machine operation failed.',
-                code: error.code || 'FLEET_ERROR'
-            })
-        }
+        return handleFleetNodeRoutes(this, req, res, url, io, (r, s, u, i) => super.handle(r, s, u, i))
     }
 }

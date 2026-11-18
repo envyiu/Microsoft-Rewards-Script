@@ -198,9 +198,18 @@ test('bootstrap retries a slow Rewards DOM and dismisses the welcome dialog with
 test('welcome dialog chooses Get started only inside the Rewards welcome dialog', async () => {
     let clicked = 0
     let closeSlotChecked = false
-    const button = { first: () => button, isVisible: async () => true, click: async () => { clicked++ } }
+    const button = {
+        first: () => button,
+        isVisible: async () => true,
+        click: async () => {
+            clicked++
+        }
+    }
     const dialog = {
-        filter: ({ hasText }) => { assert.ok(hasText.test('Welcome to Microsoft Rewards')); return dialog },
+        filter: ({ hasText }) => {
+            assert.ok(hasText.test('Welcome to Microsoft Rewards'))
+            return dialog
+        },
         first: () => dialog,
         isVisible: async () => true,
         getByRole: (role, options) => {
@@ -211,8 +220,14 @@ test('welcome dialog chooses Get started only inside the Rewards welcome dialog'
         }
     }
     const page = {
-        getByRole: role => { assert.equal(role, 'dialog'); return dialog },
-        waitForSelector: async () => { closeSlotChecked = true; return null }
+        getByRole: role => {
+            assert.equal(role, 'dialog')
+            return dialog
+        },
+        waitForSelector: async () => {
+            closeSlotChecked = true
+            return null
+        }
     }
     await new BrowserFunc({ isMobile: false, logger }).dismissRewardsWelcomeDialog(page)
     assert.equal(clicked, 1)
@@ -305,5 +320,5 @@ test('a failed quota refresh does not turn known remaining points into a complet
     }
     await search.doSearch({ goto: async () => {} }, true, 5)
     const smartEnd = entries.find(([, title]) => title === 'SMART-SEARCH-END')
-    assert.match(smartEnd[2], /points=0 \| remaining=45 \| quotaAvailable=true$/)
+    assert.match(smartEnd[2], /points=0 \| remaining=45 \| quotaAvailable=false$/)
 })

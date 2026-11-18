@@ -1,3 +1,4 @@
+import { assertNormalSessionActive, authorizeNormalHttpSearch } from './NormalSession'
 import { Impit } from 'impit'
 import type { HttpMethod, ImpitResponse, RequestInit as ImpitRequestInit } from 'impit'
 import { createProxyRelay } from '../../common/proxyRelay.cjs'
@@ -188,11 +189,13 @@ class HttpClient {
     }
 
     public async request<T = unknown>(config: HttpRequestConfig, useProxy = true): Promise<HttpResponse<T>> {
+        assertNormalSessionActive()
         const requestConfig: HttpRequestConfig = {
             ...config,
             headers: mergeRequestHeaders(this.defaultHeaders, config.headers)
         }
         const { url, init } = toInit(requestConfig)
+        authorizeNormalHttpSearch(url)
 
         if (!useProxy) {
             if (!this.direct) this.direct = new Impit({ browser: 'chrome', timeout: DEFAULT_TIMEOUT })

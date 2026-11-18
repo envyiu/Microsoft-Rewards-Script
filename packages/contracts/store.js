@@ -82,12 +82,24 @@ export class HybridStore {
         this.db.exec('BEGIN IMMEDIATE')
         try {
             for (const entry of entries) {
-                if (!entry.sourceNode || !Number.isSafeInteger(entry.sourceEventId)) throw new Error('Invalid event identity')
+                if (!entry.sourceNode || !Number.isSafeInteger(entry.sourceEventId))
+                    throw new Error('Invalid event identity')
                 const identity = `${entry.sourceNode}:${entry.sourceEventId}`
-                const result = this.db.prepare('INSERT OR IGNORE INTO received(source,payload,emitted) VALUES (?,?,1)').run(identity, '{}')
+                const result = this.db
+                    .prepare('INSERT OR IGNORE INTO received(source,payload,emitted) VALUES (?,?,1)')
+                    .run(identity, '{}')
                 if (!result.changes) continue
-                const important = ['ACCOUNT-END','ACCOUNT-ERROR','ACCOUNT-START','SMART-SEARCH-END','SMART-WORKER-END','REWARDS-STREAK'].includes(entry.title)
-                const row = this.db.prepare('INSERT INTO events(ts,important,payload) VALUES (?,?,?)').run(Date.now(), Number(important), '{}')
+                const important = [
+                    'ACCOUNT-END',
+                    'ACCOUNT-ERROR',
+                    'ACCOUNT-START',
+                    'SMART-SEARCH-END',
+                    'SMART-WORKER-END',
+                    'REWARDS-STREAK'
+                ].includes(entry.title)
+                const row = this.db
+                    .prepare('INSERT INTO events(ts,important,payload) VALUES (?,?,?)')
+                    .run(Date.now(), Number(important), '{}')
                 const event = { ...entry, id: Number(row.lastInsertRowid) }
                 this.db.prepare('UPDATE events SET payload=? WHERE id=?').run(JSON.stringify(event), event.id)
                 accepted.push(event)
@@ -104,13 +116,24 @@ export class HybridStore {
         const now = Date.now()
         if (now - this.lastPrune < 60000) return
         this.lastPrune = now
-        this.db.prepare('DELETE FROM events WHERE ts < ? AND (important=0 OR ts < ?)').run(now - 7*86400000, now - 90*86400000)
-        this.db.exec('DELETE FROM events WHERE important=0 AND id NOT IN (SELECT id FROM events WHERE important=0 ORDER BY id DESC LIMIT 50000)')
-        const bytes = this.db.prepare('SELECT COALESCE(SUM(length(payload)),0) AS n FROM events WHERE important=0').get().n
-        if (bytes > 128*1024*1024) this.db.exec('DELETE FROM events WHERE important=0 AND id NOT IN (SELECT id FROM events WHERE important=0 ORDER BY id DESC LIMIT 10000)')
+        this.db
+            .prepare('DELETE FROM events WHERE ts < ? AND (important=0 OR ts < ?)')
+            .run(now - 7 * 86400000, now - 90 * 86400000)
+        this.db.exec(
+            'DELETE FROM events WHERE important=0 AND id NOT IN (SELECT id FROM events WHERE important=0 ORDER BY id DESC LIMIT 50000)'
+        )
+        const bytes = this.db
+            .prepare('SELECT COALESCE(SUM(length(payload)),0) AS n FROM events WHERE important=0')
+            .get().n
+        if (bytes > 128 * 1024 * 1024)
+            this.db.exec(
+                'DELETE FROM events WHERE important=0 AND id NOT IN (SELECT id FROM events WHERE important=0 ORDER BY id DESC LIMIT 10000)'
+            )
         // Per-node cursors and the dashboard source markers preserve replay identity.
         // Bound the transport inbox just as the legacy coordinator did.
-        this.db.exec('DELETE FROM received WHERE emitted=1 AND rowid NOT IN (SELECT rowid FROM received ORDER BY rowid DESC LIMIT 100000)')
+        this.db.exec(
+            'DELETE FROM received WHERE emitted=1 AND rowid NOT IN (SELECT rowid FROM received ORDER BY rowid DESC LIMIT 100000)'
+        )
     }
     recent(limit = 3000) {
         return this.db

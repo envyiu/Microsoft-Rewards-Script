@@ -51,7 +51,11 @@ function fillMissing(data: unknown, defaults: unknown, path = ''): unknown {
 }
 
 export function validateConfig(data: unknown): Config {
-    const filled = fillMissing(data, defaultConfig)
+    const normalizedInput =
+        isPlainObject(data) && 'continueOnBotWarning' in data && !('contintueOnBotWarning' in data)
+            ? { ...data, contintueOnBotWarning: data.continueOnBotWarning }
+            : data
+    const filled = fillMissing(normalizedInput, defaultConfig)
     let result = ConfigSchema.safeParse(filled)
     if (result.success) return result.data as Config
 

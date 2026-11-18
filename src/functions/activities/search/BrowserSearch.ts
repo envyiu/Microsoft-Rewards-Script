@@ -1,3 +1,5 @@
+import { learningQuery } from '../../../util/Learning'
+import { emitRuntimeEvent } from '../../../util/RuntimeEvents'
 import { waitForActivity, waitForSearch } from '../../../util/ActivityTiming'
 import type { Page } from 'patchright'
 
@@ -18,7 +20,6 @@ const POINTS_STAGNANT_LIMIT = 10
 const ZERO_POINT_PROBE_SEARCHES = 3
 
 const SEARCH_BOX = '#sb_form_q'
-const RESULT_LINK = '#b_results .b_algo h2'
 
 interface SessionStats {
     totalGained: number
@@ -30,15 +31,20 @@ export class Search extends BaseActivity {
     private searchCount = 0
 
     public async doUncountedQuery(page: Page, query: string, isMobile: boolean): Promise<void> {
-        await this.bingSearch(page, query, isMobile)
+        await this.bingSearch(page, query, isMobile, 'warmup')
         const url = new URL(page.url())
-        if (!['www.bing.com', 'bing.com'].includes(url.hostname) || url.pathname !== '/search' || url.searchParams.get('q') !== query)
+        if (
+            !['www.bing.com', 'bing.com'].includes(url.hostname) ||
+            url.pathname !== '/search' ||
+            url.searchParams.get('q') !== query
+        )
             throw new Error('Bing search result was not confirmed')
         await page.locator('#b_results').waitFor({ state: 'visible', timeout: 15000 })
     }
 
     public async doSearch(page: Page, isMobile: boolean, budget?: number): Promise<number> {
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
+        if (budget != null) emitRuntimeEvent('searchStart', { platform: isMobile ? 'mobile' : 'desktop', budget })
         this.bot.logger.info(isMobile, 'SEARCH-BING', `Starting Bing searches | currentBalance=${startBalance}`)
 
         const tracker = new PointsTracker(this.bot, isMobile, budget)
@@ -59,10 +65,19 @@ export class Search extends BaseActivity {
                 `Completed Bing searches | pointsGained=${stats.totalGained} | currentBalance=${this.bot.userData.currentPoints} | previousBalance=${startBalance} | searches=${stats.performed} | ${tracker.progress()}`
             )
             if (budget != null) {
+                const payload = {
+                    platform: isMobile ? 'mobile' : 'desktop',
+                    budget,
+                    queries: stats.performed,
+                    points: stats.totalGained,
+                    remaining: tracker.remaining,
+                    quotaAvailable: tracker.quotaAvailable
+                }
+                emitRuntimeEvent('searchProgress', payload)
                 this.bot.logger.info(
                     isMobile,
                     'SMART-SEARCH-END',
-                    `platform=${isMobile ? 'mobile' : 'desktop'} | budget=${budget} | queries=${stats.performed} | points=${stats.totalGained} | remaining=${tracker.remaining} | quotaAvailable=${tracker.quotaAvailable}`
+                    `platform=${payload.platform} | budget=${budget} | queries=${stats.performed} | points=${stats.totalGained} | remaining=${tracker.remaining} | quotaAvailable=${tracker.quotaAvailable}`
                 )
             }
             return stats.totalGained
@@ -123,7 +138,12 @@ export class Search extends BaseActivity {
             await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {})
             await this.bot.browser.utils.tryDismissAllMessages(page)
 
-            while (!tracker.done() && stats.performed < tracker.maxSearches && stats.stagnant < tracker.stagnantLimit) {
+            while (
+                !this.bot.normalSession?.searchBlocked &&
+                !tracker.done() &&
+                stats.performed < tracker.maxSearches &&
+                stats.stagnant < tracker.stagnantLimit
+            ) {
                 const query = await queryQueue.next()
                 if (!query) {
                     this.bot.logger.warn(isMobile, tracker.context, 'Query queue exhausted, stopping')
@@ -131,7 +151,7 @@ export class Search extends BaseActivity {
                 }
 
                 await this.bot.browser.func.synchronizeActiveBrowserCookies('SEARCH-COOKIE-SEED', true)
-                await this.bingSearch(page, query, isMobile)
+                await this.bingSearch(page, query, isMobile, /bonus/i.test(tracker.context) ? 'bonus' : 'normal')
                 stats.performed++
 
                 await this.bot.browser.func.synchronizeActiveBrowserCookies('SEARCH-COOKIE-CAPTURE')
@@ -157,6 +177,7 @@ export class Search extends BaseActivity {
 
             return stats
         } catch (error) {
+            this.bot.normalSession?.recordRuntimeError(tracker.context, error)
             this.bot.logger.error(
                 isMobile,
                 tracker.context,
@@ -165,7 +186,12 @@ export class Search extends BaseActivity {
             return stats
         }
     }
-    private async bingSearch(page: Page, query: string, isMobile: boolean): Promise<void> {
+    private async bingSearch(
+        page: Page,
+        query: string,
+        isMobile: boolean,
+        kind: 'normal' | 'warmup' | 'bonus' = 'normal'
+    ): Promise<void> {
         this.searchCount++
 
         if (this.searchCount % REFRESH_EVERY === 0) {
@@ -174,11 +200,15 @@ export class Search extends BaseActivity {
             await this.bot.browser.utils.tryDismissAllMessages(page)
         }
 
-        for (let attempt = 1; attempt <= MAX_QUERY_ATTEMPTS; attempt++) {
+        for (let attempt = 1; attempt <= (this.bot.normalSession?.active ? 1 : MAX_QUERY_ATTEMPTS); attempt++) {
             try {
                 const searchBox = page.locator(SEARCH_BOX)
 
-                await page.evaluate(() => window.scrollTo({ left: 0, top: 0, behavior: 'auto' }))
+                if (typeof this.bot.browser.utils.cursor === 'function') {
+                    await this.bot.browser.utils.cursor(page).scrollTo('top', { scrollSpeed: 70, scrollDelay: 100 })
+                } else {
+                    await page.evaluate(() => window.scrollTo({ left: 0, top: 0, behavior: 'auto' }))
+                }
                 await page.keyboard.press('Home')
                 await searchBox.waitFor({ state: 'visible', timeout: 15000 })
 
@@ -188,26 +218,19 @@ export class Search extends BaseActivity {
 
                 if (this.bot.executionPlan?.urgent) await page.locator('#sb_form_q').fill(query)
                 else await page.keyboard.type(query, { delay: this.bot.utils.randomDelay(45, 90) })
-                const ready = this.bot.executionPlan?.urgent
-                    ? page.waitForURL(url => url.searchParams.get('q') === query, {
-                          waitUntil: 'domcontentloaded',
-                          timeout: 15000
-                      })
-                    : null
-                if (ready) {
-                    await Promise.all([ready, page.keyboard.press('Enter')])
-                    await page.locator('#b_results').waitFor({ state: 'visible', timeout: 15000 })
-                } else await page.keyboard.press('Enter')
+                if (this.bot.executionPlan?.urgent || this.bot.normalSession?.active) {
+                    await learningQuery(kind, isMobile, async () => {
+                        const ready = page.waitForURL(url => url.searchParams.get('q') === query, {
+                            waitUntil: 'domcontentloaded',
+                            timeout: 15000
+                        })
+                        await Promise.all([ready, page.keyboard.press('Enter')])
+                        await page.locator('#b_results').waitFor({ state: 'visible', timeout: 15000 })
+                    })
+                } else await learningQuery(kind, isMobile, () => page.keyboard.press('Enter'))
                 await waitForActivity(this.bot, 3000)
 
-                if (this.bot.config.searchSettings.scrollRandomResults) {
-                    await waitForActivity(this.bot, 2000)
-                    await this.randomScroll(page, isMobile)
-                }
-                if (this.bot.config.searchSettings.clickRandomResults) {
-                    await waitForActivity(this.bot, 2000)
-                    await this.clickRandomLink(page, isMobile)
-                }
+                await this.browseResults(page, isMobile)
 
                 await waitForSearch(
                     this.bot,
@@ -219,6 +242,8 @@ export class Search extends BaseActivity {
 
                 return
             } catch (error) {
+                if (this.bot.normalSession?.active || (error as { code?: string })?.code === 'DAILY_SEARCH_CAP')
+                    throw error
                 this.bot.logger.warn(
                     isMobile,
                     'SEARCH-BING',
@@ -230,39 +255,88 @@ export class Search extends BaseActivity {
         }
     }
 
-    private async randomScroll(page: Page, isMobile: boolean) {
+    public async browseResults(page: Page, isMobile: boolean): Promise<void> {
+        const settings = this.bot.config.searchSettings
+        if (!settings.scrollRandomResults && !settings.clickRandomResults) return
+        let opened: Page | undefined
+        let candidate: import('patchright').ElementHandle<Node> | null = null
+        let oldTarget: string | null = null
         try {
-            await page.evaluate(() => {
-                const maxScroll = Math.max(1, document.body.scrollHeight - window.innerHeight)
-                window.scrollTo({ left: 0, top: Math.floor(Math.random() * maxScroll), behavior: 'auto' })
-            })
-        } catch (error) {
-            this.bot.logger.error(
-                isMobile,
-                'SEARCH-RANDOM-SCROLL',
-                `Failed during random scroll | ${error instanceof Error ? error.message : String(error)}`
-            )
-        }
-    }
-
-    private async clickRandomLink(page: Page, isMobile: boolean) {
-        try {
-            const searchPageUrl = page.url()
-            await this.bot.browser.utils.ghostClick(page, RESULT_LINK)
-            await waitForActivity(this.bot, this.bot.config.searchSettings.searchResultVisitTime)
-
-            if (isMobile) {
-                await page.goto(searchPageUrl)
-            } else {
-                const newTab = await this.bot.browser.utils.getLatestTab(page)
-                await this.bot.browser.utils.closeTabs(newTab)
+            const cursor = this.bot.browser.utils.cursor(page)
+            if (settings.scrollRandomResults) {
+                for (let i = 0; i < 2; i++) {
+                    await cursor.scroll(
+                        { y: this.bot.utils.randomDelay(180, 360) },
+                        { scrollSpeed: 65, scrollDelay: 200 }
+                    )
+                    await waitForActivity(this.bot, this.bot.utils.randomDelay(500, 1200))
+                }
+            }
+            if (!settings.clickRandomResults || this.bot.shuttingDown) return
+            const links = await page.locator('#b_results > .b_algo h2 a[href]').elementHandles()
+            const eligible = []
+            for (const link of links) {
+                const safe = await link
+                    .evaluate(el => {
+                        const a = el as HTMLAnchorElement
+                        const rect = a.getBoundingClientRect()
+                        let url: URL
+                        try {
+                            url = new URL(a.href)
+                        } catch {
+                            return false
+                        }
+                        return (
+                            rect.width > 0 &&
+                            rect.height > 0 &&
+                            rect.top >= 0 &&
+                            rect.bottom <= innerHeight &&
+                            ['http:', 'https:'].includes(url.protocol) &&
+                            !/(^|\.)bing\.com$/i.test(url.hostname) &&
+                            !/\.(?:exe|msi|apk|zip|rar|7z|pdf|dmg)(?:$|[?#])/i.test(url.pathname) &&
+                            !a.hasAttribute('download') &&
+                            !a.closest('[data-text-ad], .b_ad, .b_adTop, .b_adBottom')
+                        )
+                    })
+                    .catch(() => false)
+                if (safe) eligible.push(link)
+            }
+            if (!eligible.length) return
+            candidate = eligible[Math.floor(Math.random() * eligible.length)]!
+            oldTarget = await candidate.getAttribute('target')
+            await candidate.evaluate(el => (el as Element).setAttribute('target', '_blank'))
+            const popup = page.waitForEvent('popup', { timeout: 7000 }).catch(() => undefined)
+            await cursor.click(candidate as any, { moveDelay: 100, waitForClick: 80 }) // eslint-disable-line @typescript-eslint/no-explicit-any
+            opened = await popup
+            if (!opened) return
+            await opened.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {})
+            if (opened.isClosed() || this.bot.shuttingDown) return
+            const destinationCursor = this.bot.browser.utils.cursor(opened)
+            for (let i = 0; i < 2 && !opened.isClosed() && !this.bot.shuttingDown; i++) {
+                await destinationCursor.scroll(
+                    { y: this.bot.utils.randomDelay(160, 350) },
+                    { scrollSpeed: 65, scrollDelay: 200 }
+                )
+                await waitForActivity(this.bot, this.bot.utils.randomDelay(1000, 2000))
             }
         } catch (error) {
-            this.bot.logger.error(
+            this.bot.logger.warn(
                 isMobile,
-                'SEARCH-RANDOM-CLICK',
-                `Failed during random click | ${error instanceof Error ? error.message : String(error)}`
+                'SEARCH-BROWSE',
+                `Result browsing skipped | ${error instanceof Error ? error.message : String(error)}`
             )
+        } finally {
+            if (candidate)
+                await candidate
+                    .evaluate(
+                        (el, target) =>
+                            target === null
+                                ? (el as Element).removeAttribute('target')
+                                : (el as Element).setAttribute('target', target),
+                        oldTarget
+                    )
+                    .catch(() => {})
+            if (opened && !opened.isClosed()) await opened.close().catch(() => {})
         }
     }
 }
@@ -290,7 +364,8 @@ class PointsTracker implements SearchTracker {
         private isMobile: boolean,
         private readonly budget?: number
     ) {
-        this.runOnZeroPoints = this.bot.config.searchSettings.runOnZeroPoints ?? false
+        this.runOnZeroPoints =
+            !this.bot.normalSession?.active && (this.bot.config.searchSettings.runOnZeroPoints ?? false)
         this.searchProgress = new SearchProgress(this.bot)
     }
 
@@ -308,6 +383,7 @@ class PointsTracker implements SearchTracker {
             `Search points remaining | edge=${this.missing.edgePoints} | desktop=${this.missing.desktopPoints} | mobile=${this.missing.mobilePoints}`
         )
 
+        if (this.bot.normalSession?.active && !this.quotaAvailable) return false
         if (this.missing.totalPoints <= 0) {
             if (this.quotaAvailable && this.budget != null) {
                 this.bot.logger.info(
@@ -336,7 +412,11 @@ class PointsTracker implements SearchTracker {
 
     async measure(): Promise<number> {
         const snapshot = await this.searchProgress.getSnapshot(this.isMobile)
-        if (!snapshot.quotaAvailable) return 0
+        if (!snapshot.quotaAvailable) {
+            this.quotaAvailable = false
+            if (this.bot.normalSession?.active) this.bot.normalSession.stopSearch()
+            return 0
+        }
         const updated = snapshot.missing
         const gained = Math.max(0, this.missing.totalPoints - updated.totalPoints)
         this.missing = updated

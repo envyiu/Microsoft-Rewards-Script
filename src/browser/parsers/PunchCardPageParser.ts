@@ -23,7 +23,11 @@ export async function readPunchCardParents(page: Page): Promise<RenderedPunchCar
     const section = page.locator('#quests:visible').first()
     if (await section.count()) {
         await section.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
-        await section.locator('a h3').first().waitFor({ state: 'visible', timeout: 3000 }).catch(() => {})
+        await section
+            .locator('a h3')
+            .first()
+            .waitFor({ state: 'visible', timeout: 3000 })
+            .catch(() => {})
     }
     return page.locator(PUNCHCARD_LINKS).evaluateAll(elements => {
         const text = (value: string | null | undefined) =>

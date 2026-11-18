@@ -1,5 +1,9 @@
 # Development, Change Recipes and Verification
 
+## Warmup query reservation regression checks
+
+When changing scheduler, collection or search execution, cover reserved attempts versus confirmed completions, including an uncertain send, restart/handoff, account-day rollover and an exhausted platform while service-only work remains eligible. A cap result must not be retried repeatedly or reported as an authentication failure. Preserve manual-session locking per account. The existing 30 desktop / 20 mobile limits apply to new-account warmup; they do not establish daily limits for Rewards accounts or authorize AI search experiments. See the [collector runbook](../../../scripts/learning/README.md).
+
 Use this document when implementing or reviewing a change. It records the contracts most likely to break silently.
 
 ## 1. Repository conventions
@@ -152,17 +156,17 @@ Classify every endpoint as read-only or state-changing. Preserve token checks an
 
 ## 11. Known high-risk areas
 
-| Area | Why it is fragile | Verification |
-| --- | --- | --- |
-| Microsoft login | Dynamic page states, OAuth redirects, 2FA and bot challenges | state/parser tests plus safe-account smoke |
-| Patchright/fingerprint | Browser identity and anti-bot behavior are cross-cutting | build + browser smoke; inspect session checkpoint |
-| RSC/action parsing | Next payload/action IDs change independently of TypeScript | parser fixtures, bootstrap/action logs |
-| Search counters | Mobile/desktop/Edge semantics can be confused | quota tests for null/zero/positive/split |
-| Logger strings | API derives state from titles/messages | log parser tests and API status check |
-| Config sync/overrides | Docker can persist changes and force headless | validator + mounted-config review |
-| Session DB | Contains credential-equivalent material | migration/read compatibility and no-secret review |
-| Cron locks | Stale/stuck process can suppress daily runs | shell syntax and controlled scheduler test |
-| Search JSON assets | Large user/runtime data and build-copy dependency | source/dist asset check |
+| Area                   | Why it is fragile                                            | Verification                                      |
+| ---------------------- | ------------------------------------------------------------ | ------------------------------------------------- |
+| Microsoft login        | Dynamic page states, OAuth redirects, 2FA and bot challenges | state/parser tests plus safe-account smoke        |
+| Patchright/fingerprint | Browser identity and anti-bot behavior are cross-cutting     | build + browser smoke; inspect session checkpoint |
+| RSC/action parsing     | Next payload/action IDs change independently of TypeScript   | parser fixtures, bootstrap/action logs            |
+| Search counters        | Mobile/desktop/Edge semantics can be confused                | quota tests for null/zero/positive/split          |
+| Logger strings         | API derives state from titles/messages                       | log parser tests and API status check             |
+| Config sync/overrides  | Docker can persist changes and force headless                | validator + mounted-config review                 |
+| Session DB             | Contains credential-equivalent material                      | migration/read compatibility and no-secret review |
+| Cron locks             | Stale/stuck process can suppress daily runs                  | shell syntax and controlled scheduler test        |
+| Search JSON assets     | Large user/runtime data and build-copy dependency            | source/dist asset check                           |
 
 ## 12. Current inspected worktree notes
 
@@ -230,7 +234,7 @@ For dashboard integration, run `npm test`, `npm run test:machines` and `npm run 
 
 ## 15. Rewards quest / Keep earning / streak regressions
 
-For new-account changes, run `npm run test:new-account` after build. Cover zero Rewards network traffic with a real browser (navigation, iframe, popup, background fetch), Microsoft-only login without Rewards finalization, exact 168-hour eligibility, daily rollover, query checkpoint replay, imports defaulting only future Outlook/Hotmail records, and normal runtime refusing premature entry. Onboarding fixtures must verify manual goal tracking, no redemption, fresh parent progress and repeat-safe continuation. Keep both desktop/mobile saved state and planner lifecycle through handoff. Live tests on new accounts verify only pre-Rewards behavior; real onboarding is deferred until the full seven days have elapsed.
+For new-account changes, run `npm run test:new-account` after build. Cover zero Rewards network traffic with a real browser (navigation, iframe, popup, background fetch), Microsoft-only login without Rewards finalization, exact 168/72-hour eligibility by persisted policy, daily rollover, query checkpoint replay, future external-domain imports using search-only warmup while legacy records keep their policy, and normal runtime refusing premature entry. Onboarding fixtures must verify manual goal tracking, no redemption, fresh parent progress and repeat-safe continuation. Keep both desktop/mobile saved state and planner lifecycle through handoff. Live tests on new accounts verify only pre-Rewards behavior; real onboarding is deferred until the full seven days have elapsed.
 
 Run `npm run test:rewards-activities`, `npm run test:log-parser` and `npm run test:search-quota` after build. Cover colliding record IDs across pages, lazy/property references, zero-point activation, newly unlocked steps, disappearing completed CTAs, unacknowledged reports, seven-day/24-hour search conditions and missing hashes. Preserve activity opt-outs during browser fallbacks; never install/download an application or follow redemption links as a generic fallback. No new proxy, context identity or manual ownership flow is needed for a normal card visit.
 
@@ -241,3 +245,15 @@ At the first scheduler startup after this correction, `migrateRewardsVerificatio
 ## Selective v5 Rewards verification
 
 Run `npm run test:rewards-activities` (includes `upstreamRewards.test.js`) after build. The suite covers rendered DOM Earn/Quest parsing, unique card matching, missing hashes, delayed credit, unrelated balance changes, stale balances and expired streak periods. Preserve existing activation/unlock, multi-day deferral and Smart completion tests. Also run build/lint, log parser, search quota, scheduler, new-account and worker suites. A live canary must use an assigned non-new account on a paused/drained worker, preserve saved sessions/proxy/fingerprint, and report actual pending steps separately from completed ones. Do not claim a points-earning path passed if the live account only had already-completed offers. Restore previous per-node schedules and capacity after maintenance.
+
+For Keep earning click changes, `test:rewards-activities` also runs `earnClick.test.js`: real browser fixtures verify native click reporting, lock-icon YouTube/puzzle cards without signed hashes, delayed completion, actual disabled controls, missing credit, opt-outs, destination restrictions, collapsed sections and popup cleanup. An API dispatch-only puzzle test is not sufficient. `test:smart-scheduler` covers verification v2, two-hour rediscovery and the final once-per-day check. Acc 8 supplied the live regression case for this change. For future live validation, use an assigned Rewards account with pending cards on its owning worker, paused/drained with no manual holds; record each pending card and actual balances, preserve desktop/mobile fingerprints and checkpoint sessions, then restore the saved schedule/capacity. Never claim positive credit from completed-only fixtures or an HTTP acknowledgment.
+
+## Scheduler learning collection
+
+See [the collector contract](../../../scripts/learning/README.md) for the 28-day collection and 7-day holdout, private durable telemetry, time-based dataset preparation and quality gates. Unknown desktop/mobile daily query caps stay unset; never derive them from points or per-session budgets. Search-budget experiments remain locked without explicit caps. This collector does not activate an AI scheduler.
+
+## Conservative session regression matrix
+
+Run `npm run build`, `npm run lint`, `npm run test:normal-sessions`, `test:search-quota`, `test:log-parser`, `test:urgent-execution`, `test:hybrid`, `test:worker`, `test:browser-session`, `test:new-account`, `test:rewards-activities`, plus Manager `npm test` and dashboard `npm test`, `test:machines`, `test:ui` after changing this policy. Refresh contracts with `build:contracts` and Manager `prepare:contracts`.
+
+Cover rolling 4/24h and 90 minutes from exit; midnight/restart; pre-spawn reservation/refund versus unknown ACK; handoff and replay; four compatible tasks/one login/partial completion; missing/stale/full/lost quota; all query kinds sharing five durable attempts; two stagnant queries and one 60-second reconciliation; auth/data holds/recovery and indefinite challenge/locked holds; Run next/Urgent not bypassing protection; manual/warmup isolation. Existing compatibility scheduler fixtures explicitly disable `normalPolicy`; new default-policy tests must stay enabled. Do not use learning counters to authorize normal sessions. Deployment requires paused/drained workers and preserved state; canary/live earning and seven-day observation are separate operational verification, never implied by synthetic tests.

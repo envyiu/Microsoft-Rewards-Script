@@ -8,8 +8,11 @@ export function mergeRenderedEarn(snapshot: PageSnapshot, cards: RenderedRewardC
         const candidates = snapshot.offers.filter(offer => {
             if (card.offerIds.length) return card.offerIds.includes(offer.offerId)
             const destination = normalizeRewardUrl(offer.destination, base, true)
-            return destination !== null && destination === normalizeRewardUrl(card.destination, base, true) &&
+            return (
+                destination !== null &&
+                destination === normalizeRewardUrl(card.destination, base, true) &&
                 normalizeCardText(offer.title) === normalizeCardText(card.title)
+            )
         })
         if (candidates.length !== 1) {
             if (!card.disabled && !card.complete && card.points > 0) unmatched++

@@ -1,0 +1,16 @@
+Port 2222
+ListenAddress 127.0.0.1
+HostKey /state/ssh_host_ed25519_key
+AuthorizedKeysFile /etc/ssh/authorized_admin
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+UsePAM no
+PermitRootLogin prohibit-password
+AllowUsers root
+AllowAgentForwarding no
+X11Forwarding no
+GatewayPorts no
+ClientAliveInterval 30
+ClientAliveCountMax 3
+Subsystem sftp internal-sftp

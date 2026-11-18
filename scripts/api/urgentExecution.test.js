@@ -57,14 +57,14 @@ test('old plans remain bounded while urgent batches accept compatible workers an
     )
 })
 
-test('activity pacing is removed only for urgent execution plans', async () => {
+test('urgent execution retains configured activity pacing', async () => {
     const waits = []
     const bot = { executionPlan: { urgent: true }, utils: { wait: async time => waits.push(time) } }
     await waitForActivity(bot, 15000)
-    assert.deepEqual(waits, [])
+    assert.deepEqual(waits, [15000])
     bot.executionPlan.urgent = false
     await waitForActivity(bot, '5sec')
-    assert.deepEqual(waits, ['5sec'])
+    assert.deepEqual(waits, [15000, '5sec'])
 })
 
 test('urgent batches report completed workers independently and wait for both punchcard stages', async () => {
@@ -146,10 +146,10 @@ test('urgent browser search uses direct fill and still waits for real results re
     await searching
     assert.ok(calls.some(call => call[0] === 'fill' && call[1] === 'ready'))
     assert.ok(!calls.some(call => call[0] === 'type'))
-    assert.equal(calls.filter(call => call[0] === 'wait').length, 1)
+    assert.ok(calls.filter(call => call[0] === 'wait').length >= 1)
 })
 
-test('urgent search keeps a 5-8 second credit gap while ordinary searches retain their configured delay', async () => {
+test('urgent and ordinary searches retain their configured delay', async () => {
     const waits = []
     const ranges = []
     const bot = {
@@ -163,9 +163,9 @@ test('urgent search keeps a 5-8 second credit gap while ordinary searches retain
         }
     }
     await waitForSearch(bot, 45000)
-    assert.deepEqual(ranges, [[5000, 8000]])
-    assert.deepEqual(waits, [6500])
+    assert.deepEqual(ranges, [])
+    assert.deepEqual(waits, [45000])
     bot.executionPlan.urgent = false
     await waitForSearch(bot, 45000)
-    assert.deepEqual(waits, [6500, 45000])
+    assert.deepEqual(waits, [45000, 45000])
 })

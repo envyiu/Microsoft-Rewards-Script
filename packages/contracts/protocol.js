@@ -1,10 +1,19 @@
 export const WORKER_PROTOCOL = 3
-export const ACCOUNT_KEY = /^ACCOUNT_[1-9]\d*_(EMAIL|PASSWORD|TOTP_SECRET|RECOVERY_EMAIL|NEW_ACCOUNT_MODE|GEO_LOCALE|LANG_CODE|PROXY_(URL|PORT|USERNAME|PASSWORD|HTTP|AXIOS)|SAVE_FINGERPRINT_(MOBILE|DESKTOP))$/
+export const ACCOUNT_KEY =
+    /^ACCOUNT_[1-9]\d*_(EMAIL|PASSWORD|TOTP_SECRET|RECOVERY_EMAIL|NEW_ACCOUNT_MODE|NEW_ACCOUNT_POLICY|GEO_LOCALE|LANG_CODE|PROXY_(URL|PORT|USERNAME|PASSWORD|HTTP|AXIOS)|SAVE_FINGERPRINT_(MOBILE|DESKTOP))$/
 
 export function workerCapabilities(kind, environment = process.env) {
     const local = kind === 'local'
     return {
         preRewardsV1: true,
+        preRewardsSearch72hV1: true,
+        conservativeSessionsV1: true,
+        dailySearchLimitsV1: true,
+        streakSearchV1: true,
+        learningTelemetryV1: true,
+        structuredRuntimeEventsV1: true,
+        checkpointStopV1: true,
+        dualAxisStatusV1: true,
         directAccounts: local,
         manualBrowser: local && environment.MRS_MANUAL_BROWSER !== 'false',
         android: local && environment.MRS_ANDROID_ENABLED === 'true'
@@ -13,9 +22,19 @@ export function workerCapabilities(kind, environment = process.env) {
 
 export function requireLoopback(value) {
     const url = new URL(value)
-    if (url.protocol !== 'http:' || !['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname) ||
-        url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-        throw Object.assign(new Error('Use a loopback HTTP worker URL; remote workers use SSH.'), { code: 'BAD_REQUEST', status: 400 })
+    if (
+        url.protocol !== 'http:' ||
+        !['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname) ||
+        url.username ||
+        url.password ||
+        url.pathname !== '/' ||
+        url.search ||
+        url.hash
+    ) {
+        throw Object.assign(new Error('Use a loopback HTTP worker URL; remote workers use SSH.'), {
+            code: 'BAD_REQUEST',
+            status: 400
+        })
     }
     return url.origin
 }
@@ -31,8 +50,12 @@ export function safeMerge(base, patch) {
     const result = structuredClone(base && typeof base === 'object' ? base : {})
     for (const [key, value] of Object.entries(patch)) {
         if (['__proto__', 'constructor', 'prototype'].includes(key)) throw new Error('Unsafe configuration key')
-        result[key] = value === '***REDACTED***' ? result[key]
-            : value && typeof value === 'object' && !Array.isArray(value) ? safeMerge(result[key], value) : structuredClone(value)
+        result[key] =
+            value === '***REDACTED***'
+                ? result[key]
+                : value && typeof value === 'object' && !Array.isArray(value)
+                  ? safeMerge(result[key], value)
+                  : structuredClone(value)
     }
     return result
 }

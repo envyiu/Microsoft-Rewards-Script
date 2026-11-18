@@ -8,6 +8,7 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const PROXY_PROTOCOLS = new Set(['http:', 'https:', 'socks4:', 'socks5:'])
 const MANAGED_FIELDS = new Set([
     'NEW_ACCOUNT_MODE',
+    'NEW_ACCOUNT_POLICY',
     'EMAIL',
     'PASSWORD',
     'TOTP_SECRET',
@@ -67,7 +68,12 @@ function envFileCandidates(projectRoot) {
 }
 
 export function findEnvFile(projectRoot) {
-    return [path.join(projectRoot, '.env'), ...envFileCandidates(projectRoot).filter(file => file !== path.join(projectRoot, '.env'))].find(file => fs.existsSync(file)) ?? null
+    return (
+        [
+            path.join(projectRoot, '.env'),
+            ...envFileCandidates(projectRoot).filter(file => file !== path.join(projectRoot, '.env'))
+        ].find(file => fs.existsSync(file)) ?? null
+    )
 }
 
 function parseAssignments(raw) {
@@ -105,10 +111,15 @@ function fullAccounts(sourceEnv) {
             totpSecret: valueFromEnv(sourceEnv, `${prefix}TOTP_SECRET`) ?? '',
             recoveryEmail: valueFromEnv(sourceEnv, `${prefix}RECOVERY_EMAIL`) ?? '',
             newAccountMode: boolFromEnv(sourceEnv, `${prefix}NEW_ACCOUNT_MODE`),
+            newAccountPolicy: valueFromEnv(sourceEnv, `${prefix}NEW_ACCOUNT_POLICY`) || 'standard168h',
             geoLocale: normalizeGeoLocale(valueFromEnv(sourceEnv, `${prefix}GEO_LOCALE`) ?? 'auto'),
             langCode: normalizeLanguageCode(valueFromEnv(sourceEnv, `${prefix}LANG_CODE`) ?? 'en'),
             proxy: {
-                proxyHttp: boolFromEnv(sourceEnv, `${prefix}PROXY_HTTP`, boolFromEnv(sourceEnv, `${prefix}PROXY_AXIOS`)),
+                proxyHttp: boolFromEnv(
+                    sourceEnv,
+                    `${prefix}PROXY_HTTP`,
+                    boolFromEnv(sourceEnv, `${prefix}PROXY_AXIOS`)
+                ),
                 url: valueFromEnv(sourceEnv, `${prefix}PROXY_URL`) ?? '',
                 port: Number(valueFromEnv(sourceEnv, `${prefix}PROXY_PORT`) ?? 0),
                 username: valueFromEnv(sourceEnv, `${prefix}PROXY_USERNAME`) ?? '',
@@ -131,6 +142,7 @@ function safeAccount(account) {
         hasPassword: Boolean(account.password),
         hasRecoveryEmail: Boolean(account.recoveryEmail),
         newAccountMode: account.newAccountMode === true,
+        newAccountPolicy: account.newAccountPolicy || 'standard168h',
         hasTotp: Boolean(account.totpSecret),
         proxy: account.proxy.url
             ? {
@@ -158,10 +170,13 @@ function sanitizeProxyUrl(value) {
 function assertText(value, field, { optional = true } = {}) {
     if (value == null && optional) return ''
     if (typeof value !== 'string') fail(`${field} must be a string.`)
-    if ([...value].some(character => {
-        const code = character.charCodeAt(0)
-        return code < 32 || code === 127
-    })) fail(`${field} contains unsupported control characters.`)
+    if (
+        [...value].some(character => {
+            const code = character.charCodeAt(0)
+            return code < 32 || code === 127
+        })
+    )
+        fail(`${field} contains unsupported control characters.`)
     return value.trim()
 }
 
@@ -196,18 +211,33 @@ function normalizeProxy(raw) {
 
 function normalizeAccount(raw, existing = null) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('Each account must be an object.')
-    const emailValue = raw.email === undefined && existing ? existing.email : assertText(raw.email, 'email', { optional: false })
+    const emailValue =
+        raw.email === undefined && existing ? existing.email : assertText(raw.email, 'email', { optional: false })
     const email = String(emailValue).trim()
     if (!EMAIL_PATTERN.test(email)) fail('email must be a valid email address.')
     const password = raw.password === undefined && existing ? existing.password : assertText(raw.password, 'password')
-    const totpSecret = raw.totpSecret === undefined && existing ? existing.totpSecret : assertText(raw.totpSecret, 'totpSecret')
-    const recoveryEmail = raw.recoveryEmail === undefined && existing ? existing.recoveryEmail : assertText(raw.recoveryEmail, 'recoveryEmail')
-    const newAccountMode = raw.newAccountMode === undefined
-        ? (existing ? existing.newAccountMode === true : /@(outlook|hotmail)\.com$/i.test(email))
-        : raw.newAccountMode
+    const totpSecret =
+        raw.totpSecret === undefined && existing ? existing.totpSecret : assertText(raw.totpSecret, 'totpSecret')
+    const recoveryEmail =
+        raw.recoveryEmail === undefined && existing
+            ? existing.recoveryEmail
+            : assertText(raw.recoveryEmail, 'recoveryEmail')
+    const newAccountMode =
+        raw.newAccountMode === undefined ? (existing ? existing.newAccountMode === true : true) : raw.newAccountMode
     if (typeof newAccountMode !== 'boolean') fail('newAccountMode must be a boolean.')
-    const geoLocale = raw.geoLocale === undefined && existing ? existing.geoLocale : assertText(raw.geoLocale ?? 'auto', 'geoLocale')
-    const langCode = raw.langCode === undefined && existing ? existing.langCode : assertText(raw.langCode ?? 'en', 'langCode')
+    const newAccountPolicy =
+        raw.newAccountPolicy === undefined
+            ? existing
+                ? existing.newAccountPolicy || 'standard168h'
+                : /@(outlook|hotmail)\.com$/i.test(email)
+                  ? 'standard168h'
+                  : 'search72h'
+            : raw.newAccountPolicy
+    if (!['standard168h', 'search72h'].includes(newAccountPolicy)) fail('Invalid newAccountPolicy.')
+    const geoLocale =
+        raw.geoLocale === undefined && existing ? existing.geoLocale : assertText(raw.geoLocale ?? 'auto', 'geoLocale')
+    const langCode =
+        raw.langCode === undefined && existing ? existing.langCode : assertText(raw.langCode ?? 'en', 'langCode')
     try {
         if (geoLocale.toLowerCase() !== 'auto' && !/^[A-Za-z]{2}$/.test(geoLocale)) throw new Error('invalid country')
         new Intl.Locale(langCode)
@@ -215,8 +245,16 @@ function normalizeAccount(raw, existing = null) {
         fail('geoLocale or langCode is invalid.')
     }
     const proxy = raw.proxy === undefined && existing ? existing.proxy : normalizeProxy(raw.proxy)
-    const saveFingerprint = raw.saveFingerprint === undefined && existing ? existing.saveFingerprint : raw.saveFingerprint ?? { mobile: false, desktop: false }
-    if (!saveFingerprint || typeof saveFingerprint !== 'object' || typeof saveFingerprint.mobile !== 'boolean' || typeof saveFingerprint.desktop !== 'boolean') {
+    const saveFingerprint =
+        raw.saveFingerprint === undefined && existing
+            ? existing.saveFingerprint
+            : (raw.saveFingerprint ?? { mobile: false, desktop: false })
+    if (
+        !saveFingerprint ||
+        typeof saveFingerprint !== 'object' ||
+        typeof saveFingerprint.mobile !== 'boolean' ||
+        typeof saveFingerprint.desktop !== 'boolean'
+    ) {
         fail('saveFingerprint.mobile and saveFingerprint.desktop must be booleans.')
     }
     return {
@@ -225,6 +263,7 @@ function normalizeAccount(raw, existing = null) {
         totpSecret,
         recoveryEmail,
         newAccountMode,
+        newAccountPolicy,
         geoLocale: normalizeGeoLocale(geoLocale),
         langCode: normalizeLanguageCode(langCode),
         proxy,
@@ -233,13 +272,15 @@ function normalizeAccount(raw, existing = null) {
 }
 
 function validateBatch(rawAccounts, existingAccounts) {
-    if (!Array.isArray(rawAccounts) || rawAccounts.length < 1 || rawAccounts.length > 100) fail('accounts must contain between 1 and 100 items.')
+    if (!Array.isArray(rawAccounts) || rawAccounts.length < 1 || rawAccounts.length > 100)
+        fail('accounts must contain between 1 and 100 items.')
     const existingEmails = new Set(existingAccounts.map(account => account.email.toLowerCase()))
     const seen = new Set()
     const normalized = rawAccounts.map(raw => normalizeAccount(raw))
     for (const account of normalized) {
         const key = account.email.toLowerCase()
-        if (seen.has(key) || existingEmails.has(key)) fail(`Account email already exists: ${account.email}.`, 'DUPLICATE_ACCOUNT')
+        if (seen.has(key) || existingEmails.has(key))
+            fail(`Account email already exists: ${account.email}.`, 'DUPLICATE_ACCOUNT')
         seen.add(key)
     }
     return normalized
@@ -256,6 +297,7 @@ function accountValues(index, account) {
     const values = {
         [`${prefix}EMAIL`]: account.email,
         [`${prefix}NEW_ACCOUNT_MODE`]: String(account.newAccountMode === true),
+        [`${prefix}NEW_ACCOUNT_POLICY`]: account.newAccountPolicy || 'standard168h',
         [`${prefix}GEO_LOCALE`]: account.geoLocale,
         [`${prefix}LANG_CODE`]: account.langCode,
         [`${prefix}PROXY_HTTP`]: String(account.proxy.proxyHttp),
@@ -319,7 +361,10 @@ function removeAccountBlock(raw, index) {
 }
 
 function atomicWrite(filename, content) {
-    const temp = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`)
+    const temp = path.join(
+        path.dirname(filename),
+        `.${path.basename(filename)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+    )
     try {
         fs.writeFileSync(temp, content, { mode: 0o600, flag: 'wx' })
         fs.chmodSync(temp, 0o600)
@@ -339,7 +384,10 @@ function readWritableDocument(projectRoot, sourceEnv) {
     for (const key of Object.keys(sourceEnv)) {
         if (!key.startsWith('ACCOUNT_') || !/^ACCOUNT_[1-9]\d*_/.test(key)) continue
         if (!fileKeys.has(key) && valueFromEnv(sourceEnv, key)) {
-            fail('Account environment is externally managed; edit the mounted .env file instead.', 'ACCOUNT_WRITE_UNAVAILABLE')
+            fail(
+                'Account environment is externally managed; edit the mounted .env file instead.',
+                'ACCOUNT_WRITE_UNAVAILABLE'
+            )
         }
     }
     return { filename, raw }

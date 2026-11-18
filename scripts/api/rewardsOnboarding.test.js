@@ -12,14 +12,20 @@ test('fresh Rewards membership without lifetime is recognized only beside its we
         const page = await browser.newPage()
         await page.setContent('<h2>Welcome to<br>Microsoft Rewards</h2><button>Get started</button>')
         const account = { level: 1, pointsProgress: 0, pointsRemaining: 500, lifetimeEarn: null }
-        const login = new Login({ isMobile: true, logger: { info() {} }, browser: { react: { snapshotPage: () => ({ account }) } } })
+        const login = new Login({
+            isMobile: true,
+            logger: { info() {} },
+            browser: { react: { snapshotPage: () => ({ account }) } }
+        })
         assert.equal(await login.hasAuthenticatedRewardsPayload(page), true)
         await page.getByRole('button').evaluate(button => button.remove())
         assert.equal(await login.hasAuthenticatedRewardsPayload(page), false)
         await page.setContent('<h2>Welcome to<br>Microsoft Rewards</h2><button>Get started</button>')
         account.level = null
         assert.equal(await login.hasAuthenticatedRewardsPayload(page), false)
-    } finally { await browser.close() }
+    } finally {
+        await browser.close()
+    }
 })
 
 test('onboarding follows the first-time UI, selects manual goal tracking and verifies progress without redeeming', async () => {
@@ -37,7 +43,8 @@ test('onboarding follows the first-time UI, selects manual goal tracking and ver
               function go(step,url){mark(step);location.href=url}
             </script>`
             let body
-            if (pathname === '/dashboard') body = `<div id="welcome"><div><h2>Welcome to<br>Microsoft Rewards</h2></div><button onclick="localStorage.setItem('welcomed','yes');this.parentElement.remove()">Get started</button></div>
+            if (pathname === '/dashboard')
+                body = `<div id="welcome"><div><h2>Welcome to<br>Microsoft Rewards</h2></div><button onclick="localStorage.setItem('welcomed','yes');this.parentElement.remove()">Get started</button></div>
               <script>if(localStorage.getItem('welcomed'))document.getElementById('welcome').remove()</script>
               <h1>Get started with Rewards</h1><p id="progress"></p>
               <script>document.getElementById('progress').textContent=done.length+'/7 tasks'</script>
@@ -48,7 +55,8 @@ test('onboarding follows the first-time UI, selects manual goal tracking and ver
                 document.querySelectorAll('[data-step]').forEach(el=>{if(done.includes(el.dataset.step))el.remove()});
               </script>`
             else if (pathname === '/redeem') body = '<a href="/redeem/roblox">Roblox Digital Card</a>'
-            else if (pathname === '/redeem/roblox') body = `<button onclick="localStorage.setItem('package','840')">840 Robux</button><button>1050 Robux</button>
+            else if (pathname === '/redeem/roblox')
+                body = `<button onclick="localStorage.setItem('package','840')">840 Robux</button><button>1050 Robux</button>
               <button onclick="localStorage.setItem('redeemed','yes')">Redeem now</button>
               <label style="position:relative;display:block;padding:10px">Set as your Rewards goal<input type="checkbox" role="switch" style="position:absolute;opacity:0;width:1px;height:1px" onchange="document.getElementById('goal').hidden=false"><span style="position:absolute;inset:0"></span></label>
               <div id="goal" role="dialog" hidden><h2>Set a Rewards goal</h2>
@@ -62,14 +70,28 @@ test('onboarding follows the first-time UI, selects manual goal tracking and ver
         const page = await context.newPage()
         page.on('pageerror', error => events.push({ message: error.message }))
         await page.goto('https://rewards.bing.com/dashboard')
-        const logger = { info: (_mobile, title, message) => events.push({ title, message }), warn: (_mobile, title, message) => events.push({ title, message }) }
+        const logger = {
+            info: (_mobile, title, message) => events.push({ title, message }),
+            warn: (_mobile, title, message) => events.push({ title, message })
+        }
         await runRewardsOnboarding({ isMobile: false, logger }, page)
         assert.equal(await page.evaluate(() => localStorage.getItem('welcomed')), 'yes')
         assert.equal(await page.evaluate(() => localStorage.getItem('redeemed')), null)
-        assert.equal(await page.evaluate(() => localStorage.getItem('package')), '840', JSON.stringify(events) + await page.content())
-        assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('steps') || '[]')), ['tour', 'goal', 'browse', 'level'])
+        assert.equal(
+            await page.evaluate(() => localStorage.getItem('package')),
+            '840',
+            JSON.stringify(events) + (await page.content())
+        )
+        assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('steps') || '[]')), [
+            'tour',
+            'goal',
+            'browse',
+            'level'
+        ])
         assert.equal(events.filter(e => e.message.includes('status=verified')).length, 4)
         await runRewardsOnboarding({ isMobile: false, logger }, page)
         assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('steps')).length), 4)
-    } finally { await browser.close() }
+    } finally {
+        await browser.close()
+    }
 })

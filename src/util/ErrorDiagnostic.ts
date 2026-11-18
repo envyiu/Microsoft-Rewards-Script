@@ -1,10 +1,30 @@
 import fs from 'fs/promises'
 import path from 'path'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import type { Page } from 'patchright'
 
 interface UnknownPageDiagnosticOptions {
     platform: 'mobile' | 'desktop'
+}
+
+const MAX_ERROR_DIAGNOSTICS_PER_PROCESS = 5
+let diagnosticCount = 0
+let diagnosticSequence = 0
+let diagnosticChain: Promise<void> = Promise.resolve()
+
+function redactSensitiveText(input: string): string {
+    return input
+        .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[REDACTED]')
+        .replace(/((?:password|passwd|secret|token|cookie|totp|authorization)\s*[:=]\s*)([^\s"'&|]+)/gi, '$1[REDACTED]')
+        .replace(/(https?:\/\/|socks5?:\/\/)([^:@\s/]+):([^@\s/]+)@/gi, '$1[REDACTED]:[REDACTED]@')
+}
+
+function redactHtmlDom(html: string): string {
+    return redactSensitiveText(
+        html
+            .replace(/(<input\b[^>]*type=["']password["'][^>]*\bvalue=)(["'])[^"']*\2/gi, '$1$2[REDACTED]$2')
+            .replace(/(<input\b[^>]*\bvalue=)(["'])[^"']*\2([^>]*type=["']password["'])/gi, '$1$2[REDACTED]$2$3')
+    )
 }
 
 function safePathSegment(value: string, fallback: string): string {
@@ -31,26 +51,33 @@ function unknownPageOutputDir(rawUrl: string, capturedAt: string, platform: stri
 
     const urlHash = createHash('sha256').update(rawUrl).digest('hex').slice(0, 12)
     const urlFolder = `${pathname}-${urlHash}`
-    const captureFolder = `${capturedAt.replace(/[:.]/g, '-')}-${platform}`
+    const captureFolder = `${capturedAt.replace(/[:.]/g, '-')}-${platform}-${randomUUID().slice(0, 8)}`
 
-    return path.join(process.env.API_DIAGNOSTICS_DIR || path.join(process.cwd(), 'diagnostics'), 'unknown-login-pages', hostname, urlFolder, captureFolder)
+    return path.join(
+        process.env.API_DIAGNOSTICS_DIR || path.join(process.cwd(), 'diagnostics'),
+        'unknown-login-pages',
+        hostname,
+        urlFolder,
+        captureFolder
+    )
 }
 
-export async function errorDiagnostic(page: Page, error: Error): Promise<void> {
+async function captureErrorDiagnosticNow(page: Page, error: Error): Promise<void> {
+    if (!page || page.isClosed() || diagnosticCount >= MAX_ERROR_DIAGNOSTICS_PER_PROCESS) {
+        return
+    }
+    diagnosticCount++
+    const seq = ++diagnosticSequence
     try {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-        const folderName = `error-${timestamp}`
-        const outputDir = path.join(process.env.API_DIAGNOSTICS_DIR || path.join(process.cwd(), 'diagnostics'), folderName)
+        const folderName = `error-${timestamp}-${seq}-${randomUUID().slice(0, 8)}`
+        const outputDir = path.join(
+            process.env.API_DIAGNOSTICS_DIR || path.join(process.cwd(), 'diagnostics'),
+            folderName
+        )
 
-        if (!page) {
-            return
-        }
-
-        if (page.isClosed()) {
-            return
-        }
-
-        const errorLog = `
+        const errorLog = redactSensitiveText(
+            `
 Name: ${error.name}
 Message: ${error.message}
 Timestamp: ${new Date().toISOString()}
@@ -58,24 +85,39 @@ Timestamp: ${new Date().toISOString()}
 Stack Trace:
 ${error.stack || 'No stack trace available'}
         `.trim()
+        )
 
-        const [htmlContent, screenshotBuffer] = await Promise.all([
+        const [htmlResult, screenshotResult] = await Promise.allSettled([
             page.content(),
             page.screenshot({ fullPage: true, type: 'png' })
         ])
 
         await fs.mkdir(outputDir, { recursive: true })
-
-        await Promise.all([
-            fs.writeFile(path.join(outputDir, 'dump.html'), htmlContent),
-            fs.writeFile(path.join(outputDir, 'screenshot.png'), screenshotBuffer),
-            fs.writeFile(path.join(outputDir, 'error.txt'), errorLog)
-        ])
+        const writes: Promise<void>[] = [fs.writeFile(path.join(outputDir, 'error.txt'), errorLog)]
+        if (htmlResult.status === 'fulfilled') {
+            writes.push(fs.writeFile(path.join(outputDir, 'dump.html'), redactHtmlDom(htmlResult.value)))
+        }
+        if (screenshotResult.status === 'fulfilled') {
+            writes.push(fs.writeFile(path.join(outputDir, 'screenshot.png'), screenshotResult.value))
+        }
+        await Promise.all(writes)
 
         console.log(`Diagnostics saved to: ${outputDir}`)
-    } catch (error) {
-        console.error('Unable to create error diagnostics:', error)
+    } catch (err) {
+        console.error('Unable to create error diagnostics:', err)
     }
+}
+
+export function errorDiagnostic(page: Page, error: Error): Promise<void> {
+    if (!page || page.isClosed() || diagnosticCount >= MAX_ERROR_DIAGNOSTICS_PER_PROCESS) {
+        return diagnosticChain
+    }
+    diagnosticChain = diagnosticChain.then(() => captureErrorDiagnosticNow(page, error)).catch(() => {})
+    return diagnosticChain
+}
+
+export function flushErrorDiagnostics(): Promise<void> {
+    return diagnosticChain
 }
 
 export async function unknownPageDiagnostic(
@@ -97,7 +139,7 @@ export async function unknownPageDiagnostic(
         ])
 
         const metadata = {
-            url: rawUrl,
+            url: redactSensitiveText(rawUrl),
             capturedAt,
             platform,
             htmlCaptured: htmlResult.status === 'fulfilled',
@@ -117,7 +159,7 @@ export async function unknownPageDiagnostic(
         ]
 
         if (htmlResult.status === 'fulfilled') {
-            writes.push(fs.writeFile(path.join(outputDir, 'page.html'), htmlResult.value))
+            writes.push(fs.writeFile(path.join(outputDir, 'page.html'), redactHtmlDom(htmlResult.value)))
         }
         if (screenshotResult.status === 'fulfilled') {
             writes.push(fs.writeFile(path.join(outputDir, 'screenshot.png'), screenshotResult.value))

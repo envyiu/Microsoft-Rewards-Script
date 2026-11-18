@@ -14,6 +14,8 @@ export const SMART_WORKERS = [
 
 export const DEFAULT_SMART_CONFIG = {
     enabled: false,
+    streakSearchV1: false,
+    normalPolicy: { enabled: true, maxSessions: 4, windowHours: 24, restMinutes: 90, maxQueries: 5, maxTasks: 4 },
     maxParallel: 2,
     cooldownMinutes: { min: 45, max: 120 },
     searchTarget: { min: 5, max: 10 },
@@ -91,12 +93,33 @@ function normalizeProfile(raw, knownIndexes) {
 export function validateSmartConfig(raw, accounts = []) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('Smart schedule must be a JSON object.')
     if (raw.profiles != null && !Array.isArray(raw.profiles)) fail('profiles must be an array.')
+    if (raw.normalPolicy != null && (typeof raw.normalPolicy !== 'object' || Array.isArray(raw.normalPolicy)))
+        fail('normalPolicy must be an object.')
     const merged = structuredClone(DEFAULT_SMART_CONFIG)
     Object.assign(merged, raw)
     merged.cooldownMinutes = { ...DEFAULT_SMART_CONFIG.cooldownMinutes, ...(raw.cooldownMinutes || {}) }
     merged.searchTarget = { ...DEFAULT_SMART_CONFIG.searchTarget, ...(raw.searchTarget || {}) }
+    merged.normalPolicy = { ...DEFAULT_SMART_CONFIG.normalPolicy, ...(raw.normalPolicy || {}) }
+    if (typeof merged.normalPolicy.enabled !== 'boolean') fail('normalPolicy.enabled must be a boolean.')
+    integer(merged.normalPolicy.maxSessions, 'normalPolicy.maxSessions', 1, 50)
+    integer(merged.normalPolicy.windowHours, 'normalPolicy.windowHours', 24, 168)
+    integer(merged.normalPolicy.restMinutes, 'normalPolicy.restMinutes', 90, 1440)
+    integer(merged.normalPolicy.maxQueries, 'normalPolicy.maxQueries', 1, 5)
+    integer(merged.normalPolicy.maxTasks, 'normalPolicy.maxTasks', 1, 4)
+    if (merged.dailySearchLimits != null) {
+        if (typeof merged.dailySearchLimits !== 'object' || Array.isArray(merged.dailySearchLimits))
+            fail('dailySearchLimits must be an object.')
+        for (const platform of ['mobile', 'desktop']) {
+            const range = merged.dailySearchLimits[platform]
+            if (!range || typeof range !== 'object' || Array.isArray(range))
+                fail(`dailySearchLimits.${platform} must be a range.`)
+            integer(range.min, `dailySearchLimits.${platform}.min`, 0, 100)
+            integer(range.max, `dailySearchLimits.${platform}.max`, range.min, 100)
+        }
+    }
     merged.retry = { ...DEFAULT_SMART_CONFIG.retry, ...(raw.retry || {}) }
     if (typeof merged.enabled !== 'boolean') fail('enabled must be a boolean.')
+    if (typeof merged.streakSearchV1 !== 'boolean') fail('streakSearchV1 must be a boolean.')
     integer(merged.maxParallel, 'maxParallel', 1, 32)
     integer(merged.cooldownMinutes.min, 'cooldownMinutes.min', 1, 1440)
     integer(merged.cooldownMinutes.max, 'cooldownMinutes.max', merged.cooldownMinutes.min, 1440)

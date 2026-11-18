@@ -8,37 +8,12 @@ import { fileURLToPath } from 'node:url'
 import { ProcessManager } from './processManager.js'
 import { accountExecutions } from './execution.js'
 import { AccountIpChecker } from './accountIpChecker.js'
-import { buildExcludedAccountsEnv, buildSingleAccountEnv, loadAccounts, mergeAccountStats } from './accounts.js'
-import {
-    accountWriteAvailable,
-    addAccounts,
-    deleteAccount,
-    listManagedAccounts,
-    previewAccounts,
-    updateAccount
-} from './accountStore.js'
-import {
-    validateConfig,
-    deepMerge,
-    readConfig,
-    writeConfigAtomic,
-    diffConfig,
-    syncMissingDefaults
-} from './configEditor.js'
-import { readSchedule, writeSchedule } from './scheduleStore.js'
-import { deleteStoredSessions, listStoredSessions } from './sessionStore.js'
+import { loadAccounts } from '../../packages/contracts/accounts.js'
 import { resolveRunCommand } from './runCommand.js'
 import { SmartScheduler, deriveNetworkGroup } from './smartScheduler.js'
 import { ManualSessionManager } from './manualSessionManager.js'
 import { Hybrid } from './hybrid.js'
-import {
-    accountRefForEmail,
-    getAndroidSessions,
-    openAndroidSession,
-    openAndroidViewer,
-    stopAndroidSession,
-    deleteAndroidSession
-} from './androidSessions.js'
+import { accountRefForEmail } from './androidSessions.js'
 import {
     log,
     parseArgs,
@@ -46,19 +21,27 @@ import {
     getProjectRoot,
     loadEnvFile,
     loadConfigSafe,
-    redactSecrets,
     envStr,
     envBool
 } from './lib.js'
+import { createRouter } from './routes/createRouter.js'
+import { handleSessionAndObservabilityRoutes } from './routes/sessions.js'
+import { handleAccountRoutes } from './routes/accounts.js'
+import { handleConfigAndLegacyScheduleRoutes } from './routes/config.js'
+import { handleSmartScheduleAndControlRoutes } from './routes/smartSchedule.js'
+import { handleManualSessionRoutes } from './routes/manualSessions.js'
+import { handleAndroidSessionRoutes } from './routes/androidSessions.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = getProjectRoot(__dirname)
 
 if (process.env.MRS_SKIP_ENV_FILE !== '1') loadEnvFile(projectRoot)
-const Controller = process.env.MRS_WORKER_MODE === '1'
-    ? (await import('../worker/agent.js')).WorkerAgent
-    : process.env.MRS_FLEET_ENABLED === '1' && process.env.MRS_NODE_ROLE === 'local'
-      ? (await import('./fleet.js')).Fleet : Hybrid
+const Controller =
+    process.env.MRS_WORKER_MODE === '1'
+        ? (await import('../worker/agent.js')).WorkerAgent
+        : process.env.MRS_FLEET_ENABLED === '1' && process.env.MRS_NODE_ROLE === 'local'
+          ? (await import('./fleet.js')).Fleet
+          : Hybrid
 const hybrid = new Controller({
     projectRoot,
     environment: process.env
@@ -188,7 +171,9 @@ function syncManualLock(accountIndex, active) {
     if (!account) return
     smartScheduler.setManualLock(
         account.index,
-        process.env.MRS_WORKER_MODE === '1' ? null : deriveNetworkGroup(account, smartScheduler.get().config.networkGroupOverride)
+        process.env.MRS_WORKER_MODE === '1'
+            ? null
+            : deriveNetworkGroup(account, smartScheduler.get().config.networkGroupOverride)
     )
 }
 
@@ -389,13 +374,6 @@ async function readJsonObject(req, limitBytes) {
     return body
 }
 
-function readForce(body) {
-    if ('force' in body && typeof body.force !== 'boolean') {
-        throw Object.assign(new Error('`force` must be a boolean.'), { code: 'BAD_REQUEST' })
-    }
-    return body.force ?? false
-}
-
 function handleEventStream(req, res, url) {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
@@ -456,6 +434,15 @@ function handleEventStream(req, res, url) {
     req.on('error', cleanup)
 }
 
+const dispatchApiRoutes = createRouter([
+    handleSessionAndObservabilityRoutes,
+    handleAccountRoutes,
+    handleConfigAndLegacyScheduleRoutes,
+    handleSmartScheduleAndControlRoutes,
+    handleManualSessionRoutes,
+    handleAndroidSessionRoutes
+])
+
 const requestHandler = async (req, res) => {
     let url
     try {
@@ -490,8 +477,9 @@ const requestHandler = async (req, res) => {
                     if (
                         !pathname.startsWith('/internal/hybrid/') ||
                         !String(req.headers['accept-encoding']).includes('gzip')
-                    )
+                    ) {
                         return sendJson(response, status, data)
+                    }
                     gzip(JSON.stringify(data), (error, buffer) => {
                         if (error) return sendJson(response, 500, { error: 'Could not encode node response' })
                         response.writeHead(status, {
@@ -502,979 +490,66 @@ const requestHandler = async (req, res) => {
                     })
                 }
             })
-        )
-            return
-        // index
-        if (method === 'GET' && pathname === '/') {
-            return sendJson(res, 200, {
-                name: pkgName,
-                version: pkgVersion,
-                message: 'Control API',
-                authRequired: Boolean(TOKEN),
-                stateless: true,
-                endpoints: [
-                    'GET /health',
-                    'GET /status',
-                    'GET /points',
-                    'GET /logs',
-                    'GET /errors',
-                    'GET /history',
-                    'GET /accounts',
-                    'POST /accounts/check-ip',
-                    'POST /accounts/validate',
-                    'POST /accounts',
-                    'PATCH /accounts/:index',
-                    'DELETE /accounts/:index',
-                    'GET /sessions',
-                    'GET /diagnostics',
-                    'GET /events',
-                    'GET /config',
-                    'GET /config/diff',
-                    'POST /config/sync',
-                    'GET /schedule',
-                    'GET /smart-schedule',
-                    'GET /manual-sessions',
-                    'POST /manual-sessions',
-                    'GET /android-sessions',
-                    'POST /android-sessions',
-                    'POST /android-sessions/:accountIndex/viewer',
-                    'POST /android-sessions/:accountIndex/stop',
-                    'DELETE /android-sessions/:accountIndex',
-                    'POST /start',
-                    'POST /stop',
-                    'POST /restart',
-                    'POST /shutdown',
-                    'DELETE /sessions/:email',
-                    'PUT|PATCH /config',
-                    'PUT|PATCH /schedule',
-                    'PUT /smart-schedule',
-                    'POST /smart-schedule/replan',
-                    'POST /smart-schedule/urgent'
-                ]
-            })
-        }
-
-        // health
-        if (method === 'GET' && pathname === '/health') {
-            return sendJson(res, 200, {
-                ok: true,
-                name: pkgName,
-                version: pkgVersion,
-                state: getStatus().state,
-                uptimeSec: Math.round((Date.now() - startedAt) / 1000),
-                authRequired: Boolean(TOKEN)
-            })
-        }
-
-        // status
-        if (method === 'GET' && pathname === '/status') {
-            return sendJson(res, 200, getStatus())
-        }
-
-        // point read live
-        if (method === 'GET' && pathname === '/points') {
-            return sendJson(res, 200, pm.getPoints())
-        }
-
-        // log read
-        if (method === 'GET' && pathname === '/logs') {
-            const limit = clampInt(url.searchParams.get('limit'), 1, LOG_BUFFER, 200)
-            const afterId = url.searchParams.has('afterId') ? Number(url.searchParams.get('afterId')) : null
-            const minLevel = url.searchParams.get('level') || null
-            if (minLevel && !['debug', 'info', 'warn', 'error'].includes(minLevel)) {
-                return sendJson(res, 400, {
-                    error: '`level` must be one of: debug, info, warn, error.',
-                    code: 'BAD_REQUEST'
-                })
-            }
-            return sendJson(
-                res,
-                200,
-                pm.getLogs({ limit, afterId: Number.isFinite(afterId) ? afterId : null, minLevel })
-            )
-        }
-
-        // error read
-        if (method === 'GET' && pathname === '/errors') {
-            const limit = clampInt(url.searchParams.get('limit'), 1, LOG_BUFFER, 100)
-            const includeWarnings = url.searchParams.get('warnings') !== 'false'
-            return sendJson(res, 200, pm.getErrors({ limit, includeWarnings }))
-        }
-
-        // history
-        if (method === 'GET' && pathname === '/history') {
-            const limit = clampInt(url.searchParams.get('limit'), 1, RUN_HISTORY, RUN_HISTORY)
-            const runs = pm.getHistory().slice(0, limit).map(toHistoryRecord)
-            return sendJson(res, 200, { runs, count: runs.length, inMemoryOnly: true })
-        }
-
-        // account overview
-        const stopSmartAccount = pathname.match(/^\/smart-schedule\/accounts\/([1-9]\d*)\/stop$/)
-        if (method === 'POST' && stopSmartAccount) {
-            if (!ALLOW_SCHEDULE_WRITE) return sendJson(res, 403, { error: 'Schedule writes disabled.' })
-            const body = await readJsonObject(req)
-            try {
-                return sendJson(res, 200, await smartScheduler.stopAccount(Number(stopSmartAccount[1]), body.jobId))
-            } catch (error) {
-                return sendJson(res, error.status || 500, { error: error.message, code: error.code })
-            }
-        }
-
-        if (method === 'GET' && pathname === '/accounts') {
-            const execution = getSmartState().execution
-            const accounts = mergeAccountStats(loadAccounts(), pm.getHistory().map(toHistoryRecord))
-            const safeAccounts = listManagedAccounts()
-            const safeByIndex = new Map(safeAccounts.map(account => [account.index, account]))
-            const merged = accounts.map(account => ({
-                ...account,
-                ...safeByIndex.get(account.index),
-                ipCheck: accountIpChecker.get(account.index),
-                execution: execution[account.index],
-                ...(hybrid.metadata
-                    ? hybrid.metadata(account)
-                    : hybrid.enabled
-                      ? {
-                            node: hybrid.remoteOwned(account) ? 'vps' : 'local',
-                            nodeOnline: hybrid.remoteOwned(account) ? hybrid.online : true
-                        }
-                      : {})
-            }))
-            return sendJson(res, 200, {
-                accounts: merged,
-                count: merged.length,
-                writable: ALLOW_ACCOUNT_WRITE && accountWriteAvailable(projectRoot)
-            })
-        }
-
-        if (method === 'POST' && pathname === '/accounts/check-ip') {
-            const body = await readJsonObject(req)
-            try {
-                const results = await accountIpChecker.check(body.accountIndexes ?? null)
-                return sendJson(res, 200, {
-                    results,
-                    count: results.length,
-                    succeeded: results.filter(result => result.ip !== null).length
-                })
-            } catch (error) {
-                return sendJson(res, error.code === 'BAD_REQUEST' ? 400 : 500, {
-                    error: error.code === 'BAD_REQUEST' ? error.message : 'IP check failed.'
-                })
-            }
-        }
-
-        if (method === 'POST' && pathname === '/accounts/validate') {
-            const body = await readJsonObject(req)
-            const rawAccounts = Array.isArray(body.accounts) ? body.accounts : [body]
-            try {
-                return sendJson(res, 200, previewAccounts(projectRoot, rawAccounts))
-            } catch (err) {
-                return sendJson(res, err.code === 'DUPLICATE_ACCOUNT' ? 409 : 400, {
-                    error: err.message,
-                    code: err.code
-                })
-            }
-        }
-
-        if (method === 'POST' && pathname === '/accounts') {
-            if (!ALLOW_ACCOUNT_WRITE) {
-                return sendJson(res, 403, {
-                    error: 'Account writes are disabled. Set API_ALLOW_ACCOUNT_WRITE=true to enable.'
-                })
-            }
-            const body = await readJsonObject(req)
-            const rawAccounts = Array.isArray(body.accounts) ? body.accounts : [body]
-            try {
-                const result = addAccounts(projectRoot, rawAccounts)
-                smartScheduler.enrollAccounts(result.accounts.map(account => account.index))
-                pm.note('info', `Added ${result.count} account configuration(s) via API.`)
-                return sendJson(res, 201, { ...result, writable: true })
-            } catch (err) {
-                const status = ['DUPLICATE_ACCOUNT', 'ACCOUNT_WRITE_UNAVAILABLE', 'ACCOUNT_NOT_FOUND'].includes(
-                    err.code
-                )
-                    ? 409
-                    : 400
-                return sendJson(res, status, { error: err.message, code: err.code })
-            }
-        }
-
-        const accountMatch = /^\/accounts\/([1-9]\d*)$/.exec(pathname)
-        if (method === 'PATCH' && accountMatch) {
-            if (!ALLOW_ACCOUNT_WRITE) {
-                return sendJson(res, 403, {
-                    error: 'Account writes are disabled. Set API_ALLOW_ACCOUNT_WRITE=true to enable.'
-                })
-            }
-            const body = await readJsonObject(req)
-            try {
-                const result = updateAccount(projectRoot, Number(accountMatch[1]), body)
-                smartScheduler.replan()
-                if (manualSessionManager.hasAccount(Number(accountMatch[1])))
-                    syncManualLock(Number(accountMatch[1]), true)
-                pm.note('info', `Updated ACCOUNT_${accountMatch[1]} configuration via API.`)
-                return sendJson(res, 200, { ...result, writable: true })
-            } catch (err) {
-                const status =
-                    err.code === 'ACCOUNT_NOT_FOUND' ? 404 : err.code === 'ACCOUNT_WRITE_UNAVAILABLE' ? 409 : 400
-                return sendJson(res, status, { error: err.message, code: err.code })
-            }
-        }
-
-        if (method === 'DELETE' && accountMatch) {
-            if (!ALLOW_ACCOUNT_WRITE) {
-                return sendJson(res, 403, {
-                    error: 'Account writes are disabled. Set API_ALLOW_ACCOUNT_WRITE=true to enable.'
-                })
-            }
-            const index = Number(accountMatch[1])
-            const configured = loadAccounts()
-            const target = configured.find(account => account.index === index)
-            if (!target)
-                return sendJson(res, 404, { error: `ACCOUNT_${index} is not configured.`, code: 'ACCOUNT_NOT_FOUND' })
-            if (configured.length <= 1) {
-                return sendJson(res, 409, {
-                    error: 'At least one account must remain configured.',
-                    code: 'LAST_ACCOUNT'
-                })
-            }
-            const smartRunning = smartScheduler.get().running.some(job => job.accountIndex === index)
-            if (pm.getStatus().state !== 'idle' || smartRunning || manualSessionManager.hasAccount(index)) {
-                return sendJson(res, 409, {
-                    error: 'Stop the active run before deleting this account.',
-                    code: 'RUN_ACTIVE'
-                })
-            }
-            try {
-                const result = deleteAccount(projectRoot, index)
-                let sessions = null
-                try {
-                    const loaded = loadConfigSafe(projectRoot)
-                    const sessionPath =
-                        typeof loaded?.data?.sessionPath === 'string' ? loaded.data.sessionPath : 'sessions'
-                    sessions = deleteStoredSessions(projectRoot, sessionPath, target.email)
-                } catch (error) {
-                    pm.note('warn', `Deleted ACCOUNT_${index} configuration but could not remove stored sessions.`)
-                    sessions = { error: error instanceof Error ? error.message : String(error) }
-                }
-                smartScheduler.removeAccount(index)
-                pm.note('info', `Deleted ACCOUNT_${index} configuration and stored account sessions.`)
-                return sendJson(res, 200, { ...result, sessions, writable: true })
-            } catch (err) {
-                const status =
-                    err.code === 'ACCOUNT_NOT_FOUND' ? 404 : err.code === 'ACCOUNT_WRITE_UNAVAILABLE' ? 409 : 400
-                return sendJson(res, status, { error: err.message, code: err.code })
-            }
-        }
-
-        // session list
-        if (method === 'GET' && pathname === '/sessions') {
-            const loaded = loadConfigSafe(projectRoot)
-            if (!loaded) return sendJson(res, 404, { error: 'config.json not found' })
-            if (loaded.data == null)
-                return sendJson(res, 500, { error: 'config.json is invalid', detail: loaded.error })
-
-            const sessionPath = typeof loaded.data.sessionPath === 'string' ? loaded.data.sessionPath : 'sessions'
-            return sendJson(res, 200, listStoredSessions(projectRoot, sessionPath))
-        }
-
-        // account-specific session delete; intentionally no delete-all route
-        if (method === 'DELETE' && pathname === '/sessions') {
-            return sendJson(res, 400, {
-                error: 'An account email is required. Use DELETE /sessions/:email.',
-                code: 'EMAIL_REQUIRED'
-            })
-        }
-
-        if (method === 'DELETE' && pathname.startsWith('/sessions/')) {
-            if (pm.getStatus().state !== 'idle') {
-                return sendJson(res, 409, {
-                    error: 'Cannot delete sessions while a bot run is active. Stop the run first.',
-                    code: 'RUN_ACTIVE'
-                })
-            }
-
-            let email
-            try {
-                email = decodeURIComponent(pathname.slice('/sessions/'.length)).trim()
-            } catch {
-                return sendJson(res, 400, { error: 'The session email path is not valid URL encoding.' })
-            }
-            if (!email || email.length > 320 || !email.includes('@') || containsControlCharacters(email)) {
-                return sendJson(res, 400, {
-                    error: 'A valid account email is required in DELETE /sessions/:email.',
-                    code: 'INVALID_EMAIL'
-                })
-            }
-
-            const loaded = loadConfigSafe(projectRoot)
-            if (!loaded) return sendJson(res, 404, { error: 'config.json not found' })
-            if (loaded.data == null)
-                return sendJson(res, 500, { error: 'config.json is invalid', detail: loaded.error })
-
-            const sessionPath = typeof loaded.data.sessionPath === 'string' ? loaded.data.sessionPath : 'sessions'
-            const result = deleteStoredSessions(projectRoot, sessionPath, email)
-            if (!result.found) {
-                return sendJson(res, 404, {
-                    error: `No stored sessions found for ${email}.`,
-                    code: 'SESSION_NOT_FOUND'
-                })
-            }
-
-            pm.note('info', `Deleted ${result.removed} stored session row(s) for ${result.email} via API.`)
-            return sendJson(res, 200, { deleted: true, ...result })
-        }
-
-        // diag list
-        if (method === 'GET' && pathname === '/diagnostics') {
-            return sendJson(res, 200, listDiagnostics())
-        }
-
-        // diag read
-        if (method === 'GET' && pathname.startsWith('/diagnostics/')) {
-            return serveDiagnosticFile(res, pathname)
-        }
-
-        // conf read
-        if (method === 'GET' && pathname === '/config') {
-            const loaded = loadConfigSafe(projectRoot)
-            if (!loaded) return sendJson(res, 404, { error: 'config.json not found' })
-            if (loaded.data == null)
-                return sendJson(res, 500, { error: 'config.json is invalid', detail: loaded.error })
-            const reveal = REVEAL_ENABLED && Boolean(TOKEN) && url.searchParams.get('reveal') === '1'
-            const data = reveal ? loaded.data : redactSecrets(loaded.data)
-            return sendJson(res, 200, { path: loaded.path, redacted: !reveal, config: data })
-        }
-
-        if (method === 'GET' && pathname === '/config/diff') {
-            try {
-                const { addedKeys } = await diffConfig(projectRoot, {
-                    validatorModule: envStr('API_VALIDATOR_MODULE')
-                })
-                return sendJson(res, 200, { addedKeys, upToDate: addedKeys.length === 0 })
-            } catch (err) {
-                return sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
-            }
-        }
-
-        if (method === 'POST' && pathname === '/config/sync') {
-            if (!ALLOW_CONFIG_WRITE) {
-                return sendJson(res, 403, {
-                    error: 'Config writes are disabled. Set API_ALLOW_CONFIG_WRITE=true to enable.'
-                })
-            }
-            try {
-                const result = await syncMissingDefaults(projectRoot, {
-                    validatorModule: envStr('API_VALIDATOR_MODULE')
-                })
-                if (result.patched) {
-                    pm.note(
-                        'info',
-                        `config.json patched with ${result.addedKeys.length} missing key(s) via API /config/sync.`
-                    )
-                }
-                return sendJson(res, 200, { ...result, appliesOnNextRun: true })
-            } catch (err) {
-                return sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
-            }
-        }
-
-        // sched read
-        if (method === 'GET' && pathname === '/schedule') {
-            try {
-                return sendJson(res, 200, { ...readSchedule(projectRoot), writable: ALLOW_SCHEDULE_WRITE })
-            } catch (err) {
-                return sendJson(res, 500, { error: err.message, code: err.code })
-            }
-        }
-
-        if (method === 'GET' && pathname === '/smart-schedule') {
-            return sendJson(res, 200, { ...getSmartState(), writable: ALLOW_SCHEDULE_WRITE })
-        }
-
-        if (method === 'GET' && pathname === '/manual-sessions') {
-            return sendJson(res, 200, { sessions: manualSessionManager.list() })
-        }
-
-        if (method === 'POST' && pathname === '/manual-sessions') {
-            const body = await readJsonObject(req)
-            const accountIndex = Number(body.accountIndex)
-            const platform = typeof body.platform === 'string' ? body.platform.toLowerCase() : ''
-            if (!Number.isSafeInteger(accountIndex) || accountIndex < 1 || !['desktop', 'mobile'].includes(platform)) {
-                return sendJson(res, 400, {
-                    error: 'accountIndex must be a positive integer and platform must be desktop or mobile.',
-                    code: 'BAD_REQUEST'
-                })
-            }
-            const account = loadAccounts().find(item => item.index === accountIndex)
-            if (!account)
-                return sendJson(res, 404, {
-                    error: `ACCOUNT_${accountIndex} is not configured.`,
-                    code: 'ACCOUNT_NOT_FOUND'
-                })
-            try {
-                const session = await manualSessionManager.open({ accountIndex, email: account.email, platform, preRewards: smartScheduler.isPreRewardsAccount(accountIndex) })
-                pm.note('info', `Opened manual ${platform} session for ACCOUNT_${accountIndex}.`)
-                return sendJson(res, 202, { opened: true, session })
-            } catch (error) {
-                const status =
-                    error.code === 'BAD_REQUEST'
-                        ? 400
-                        : error.code === 'START_TIMEOUT'
-                          ? 504
-                          : error.code === 'START_FAILED'
-                            ? 502
-                            : 500
-                return sendJson(res, status, { error: error.message, code: error.code })
-            }
-        }
-
-        const closeManualSessionMatch = pathname.match(/^\/manual-sessions\/(\d+)\/close$/)
-        if (method === 'POST' && closeManualSessionMatch) {
-            const accountIndex = Number(closeManualSessionMatch[1])
-            const body = await readJsonObject(req)
-            const platform = typeof body.platform === 'string' ? body.platform.toLowerCase() : ''
-            if (!Number.isSafeInteger(accountIndex) || accountIndex < 1 || !['desktop', 'mobile'].includes(platform)) {
-                return sendJson(res, 400, {
-                    error: 'A positive account index and platform desktop or mobile are required.',
-                    code: 'BAD_REQUEST'
-                })
-            }
-            const account = loadAccounts().find(item => item.index === accountIndex)
-            if (!account) {
-                return sendJson(res, 404, {
-                    error: `ACCOUNT_${accountIndex} is not configured.`,
-                    code: 'ACCOUNT_NOT_FOUND'
-                })
-            }
-            try {
-                const closed = await manualSessionManager.closeForAccount({ accountIndex, platform })
-                pm.note('info', `Closed ${closed} manual ${platform} browser session(s) for ACCOUNT_${accountIndex}.`)
-                return sendJson(res, 200, { closed, accountIndex, platform })
-            } catch (error) {
-                return sendJson(res, 500, { error: error.message, code: error.code ?? 'CLOSE_FAILED' })
-            }
-        }
-
-        if (method === 'GET' && pathname === '/android-sessions') {
-            try {
-                const state = await getAndroidSessions()
-                return sendJson(res, 200, { sessions: publicAndroidSessions(state.sessions) })
-            } catch (error) {
-                const status = [
-                    'BRIDGE_UNAVAILABLE',
-                    'BRIDGE_TIMEOUT',
-                    'DAMRU_NOT_READY',
-                    'SCRCPY_UNAVAILABLE'
-                ].includes(error.code)
-                    ? 503
-                    : 502
-                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
-            }
-        }
-
-        if (method === 'POST' && pathname === '/android-sessions') {
-            const body = await readJsonObject(req)
-            const accountIndex = Number(body.accountIndex)
-            if (!Number.isSafeInteger(accountIndex) || accountIndex < 1) {
-                return sendJson(res, 400, { error: 'accountIndex must be a positive integer.', code: 'BAD_REQUEST' })
-            }
-            const account = loadAccounts().find(item => item.index === accountIndex)
-            if (!account)
-                return sendJson(res, 404, {
-                    error: `ACCOUNT_${accountIndex} is not configured.`,
-                    code: 'ACCOUNT_NOT_FOUND'
-                })
-            try {
-                const session = await openAndroidSession({ accountIndex, email: account.email })
-                return sendJson(res, 202, { opened: true, session: publicAndroidSession(session, account) })
-            } catch (error) {
-                const status = ['INVALID_PROXY_CONFIG', 'NO_WORKER_AVAILABLE', 'NO_PROFILE_AVAILABLE'].includes(
-                    error.code
-                )
-                    ? 409
-                    : ['BRIDGE_UNAVAILABLE', 'BRIDGE_TIMEOUT', 'DAMRU_NOT_READY', 'SCRCPY_UNAVAILABLE'].includes(
-                            error.code
-                        )
-                      ? 503
-                      : 502
-                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
-            }
-        }
-
-        const androidDeleteMatch = /^\/android-sessions\/([1-9]\d*)$/.exec(pathname)
-        if (method === 'DELETE' && androidDeleteMatch) {
-            const accountIndex = Number(androidDeleteMatch[1])
-            const account = loadAccounts().find(item => item.index === accountIndex)
-            if (!account)
-                return sendJson(res, 404, {
-                    error: `ACCOUNT_${accountIndex} is not configured.`,
-                    code: 'ACCOUNT_NOT_FOUND'
-                })
-            const body = await readJsonObject(req)
-            if (
-                !Number.isInteger(body.worker) ||
-                body.worker < 0 ||
-                body.worker > 49 ||
-                body.confirmation !== `DELETE ${body.worker}`
-            ) {
-                return sendJson(res, 400, {
-                    error: 'An expected worker index (0–49) and matching DELETE confirmation are required.',
-                    code: 'BAD_REQUEST'
-                })
-            }
-            if (pm.getStatus().state !== 'idle' || smartScheduler.get().running.length) {
-                return sendJson(res, 409, {
-                    error: 'Stop the active bot run before deleting an Android device.',
-                    code: 'RUN_ACTIVE'
-                })
-            }
-            try {
-                const result = await deleteAndroidSession({
-                    accountIndex,
-                    email: account.email,
-                    worker: body.worker,
-                    confirmation: body.confirmation
-                })
-                return sendJson(res, 200, {
-                    deleted: result.deleted === true,
-                    accountIndex,
-                    worker: result.worker ?? null
-                })
-            } catch (error) {
-                const status = ['WORKER_CHANGED', 'WORKER_BUSY'].includes(error.code)
-                    ? 409
-                    : ['BRIDGE_UNAVAILABLE', 'BRIDGE_TIMEOUT', 'DAMRU_NOT_READY'].includes(error.code)
-                      ? 503
-                      : 502
-                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
-            }
-        }
-
-        const androidStopMatch = /^\/android-sessions\/([1-9]\d*)\/stop$/.exec(pathname)
-        const androidViewerMatch = /^\/android-sessions\/([1-9]\d*)\/viewer$/.exec(pathname)
-        if (method === 'POST' && androidViewerMatch) {
-            const accountIndex = Number(androidViewerMatch[1])
-            const account = loadAccounts().find(item => item.index === accountIndex)
-            if (!account)
-                return sendJson(res, 404, {
-                    error: `ACCOUNT_${accountIndex} is not configured.`,
-                    code: 'ACCOUNT_NOT_FOUND'
-                })
-            try {
-                const session = await openAndroidViewer({ accountIndex, email: account.email })
-                return sendJson(res, 202, { opened: true, session: publicAndroidSession(session, account) })
-            } catch (error) {
-                const status = [
-                    'BRIDGE_UNAVAILABLE',
-                    'BRIDGE_TIMEOUT',
-                    'DAMRU_NOT_READY',
-                    'SCRCPY_UNAVAILABLE'
-                ].includes(error.code)
-                    ? 503
-                    : 502
-                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
-            }
-        }
-
-        if (method === 'POST' && androidStopMatch) {
-            const accountIndex = Number(androidStopMatch[1])
-            const account = loadAccounts().find(item => item.index === accountIndex)
-            if (!account)
-                return sendJson(res, 404, {
-                    error: `ACCOUNT_${accountIndex} is not configured.`,
-                    code: 'ACCOUNT_NOT_FOUND'
-                })
-            try {
-                const session = await stopAndroidSession({ accountIndex, email: account.email })
-                return sendJson(res, 202, { stopping: true, session: publicAndroidSession(session, account) })
-            } catch (error) {
-                const status = [
-                    'BRIDGE_UNAVAILABLE',
-                    'BRIDGE_TIMEOUT',
-                    'DAMRU_NOT_READY',
-                    'SCRCPY_UNAVAILABLE'
-                ].includes(error.code)
-                    ? 503
-                    : 502
-                return sendJson(res, status, { error: error.message, code: error.code || 'BRIDGE_ERROR' })
-            }
-        }
-
-        if (method === 'PUT' && pathname === '/smart-schedule') {
-            if (!ALLOW_SCHEDULE_WRITE) {
-                return sendJson(res, 403, {
-                    error: 'Schedule writes are disabled. Set API_ALLOW_SCHEDULE_WRITE=true to enable.'
-                })
-            }
-            const body = await readJsonObject(req)
-            try {
-                if (body.enabled === true && pm.getStatus().state !== 'idle') {
-                    return sendJson(res, 409, {
-                        error: 'Stop the active legacy run before enabling Smart Scheduler.',
-                        code: 'RUN_ACTIVE'
-                    })
-                }
-                const updated = smartScheduler.update(body)
-                refreshManualLocks()
-                if (updated.config.enabled) {
-                    const current = readSchedule(projectRoot)
-                    if (current.enabled) writeSchedule(projectRoot, { enabled: false })
-                }
-                pm.note('info', `Smart schedule ${updated.config.enabled ? 'enabled' : 'disabled'} via API.`)
-                return sendJson(res, 200, { ...getSmartState(), writable: true })
-            } catch (err) {
-                return sendJson(res, err.code === 'BAD_REQUEST' ? 400 : 500, { error: err.message, code: err.code })
-            }
-        }
-
-        if (method === 'POST' && pathname === '/smart-schedule/urgent') {
-            if (!ALLOW_SCHEDULE_WRITE) return sendJson(res, 403, { error: 'Schedule writes are disabled.' })
-            const body = await readJsonObject(req)
-            if (typeof body.enabled !== 'boolean')
-                return sendJson(res, 400, { error: 'enabled must be a boolean.', code: 'BAD_REQUEST' })
-            if (body.enabled && pm.getStatus().state !== 'idle')
-                return sendJson(res, 409, { error: 'Stop the active legacy run first.', code: 'RUN_ACTIVE' })
-            refreshManualLocks()
-            const updated = smartScheduler.setUrgent(body.enabled)
-            if (updated.effectiveEnabled) {
-                const current = readSchedule(projectRoot)
-                if (current.enabled) writeSchedule(projectRoot, { enabled: false })
-            }
-            refreshManualLocks()
-            pm.note('info', `Urgent scheduling ${body.enabled ? 'requested' : 'cancelled'} via API.`)
-            return sendJson(res, 200, { ...getSmartState(), writable: true })
-        }
-
-        if (method === 'POST' && pathname === '/smart-schedule/replan') {
-            const body = await readJsonObject(req)
-            try {
-                const accountIndexes = body.accountIndexes == null ? null : body.accountIndexes
-                if (
-                    accountIndexes != null &&
-                    (!Array.isArray(accountIndexes) ||
-                        accountIndexes.some(v => !Number.isSafeInteger(Number(v)) || Number(v) < 1))
-                ) {
-                    return sendJson(res, 400, {
-                        error: 'accountIndexes must contain positive integers.',
-                        code: 'BAD_REQUEST'
-                    })
-                }
-                smartScheduler.replan({ accountIndexes })
-                return sendJson(res, 200, getSmartState())
-            } catch (err) {
-                return sendJson(res, err.code === 'BAD_REQUEST' ? 400 : 500, { error: err.message, code: err.code })
-            }
-        }
-
-        // sched write
-        if ((method === 'PUT' || method === 'PATCH') && pathname === '/schedule') {
-            if (!ALLOW_SCHEDULE_WRITE) {
-                return sendJson(res, 403, {
-                    error: 'Schedule writes are disabled. Set API_ALLOW_SCHEDULE_WRITE=true to enable.'
-                })
-            }
-            const body = await readJsonBody(req)
-            if (body?.enabled && smartScheduler.get().effectiveEnabled) {
-                return sendJson(res, 409, {
-                    error: 'Disable Smart Scheduler before enabling cron.',
-                    code: 'SMART_SCHEDULE_ACTIVE'
-                })
-            }
-            if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-                return sendJson(res, 400, { error: 'Body must be a JSON object.' })
-            }
-            try {
-                const updated = writeSchedule(projectRoot, body)
-                pm.note(
-                    'info',
-                    `Schedule updated via API (${method}): ${updated.enabled ? `${updated.cron} (TZ ${updated.timezone})` : 'disabled'}.`
-                )
-                return sendJson(res, 200, { ...updated, writable: true })
-            } catch (err) {
-                const status = err.code === 'BAD_REQUEST' ? 400 : 500
-                return sendJson(res, status, { error: err.message, code: err.code })
-            }
-        }
-
-        // sse
-        if (method === 'GET' && pathname === '/events') {
-            return handleEventStream(req, res, url)
-        }
-
-        // start
-        if (method === 'POST' && pathname === '/start') {
-            const body = await readJsonObject(req)
-            if (smartScheduler.get().effectiveEnabled) {
-                if (body.args != null || body.env != null || body.excludedAccountIndexes != null) {
-                    return sendJson(res, 400, {
-                        error: 'Smart mode does not accept args, env, or excludedAccountIndexes.',
-                        code: 'BAD_REQUEST'
-                    })
-                }
-                const indexes = body.accountIndex == null ? null : [Number(body.accountIndex)]
-                const smart = smartScheduler.trigger(indexes, { force: true })
-                return sendJson(res, 202, { started: true, smart: true, queue: smart.queue, running: smart.running })
-            }
-            if (smartScheduler.get().running.length) {
-                return sendJson(res, 409, {
-                    error: 'Wait for active Smart Scheduler sessions to stop before starting a legacy run.',
-                    code: 'SMART_RUN_ACTIVE'
-                })
-            }
-            if (manualSessionManager.list().length) {
-                return sendJson(res, 409, {
-                    error: 'Close all manual browser sessions before starting a legacy run.',
-                    code: 'MANUAL_SESSION_ACTIVE'
-                })
-            }
-            const overrides = {}
-            let selectedAccount = null
-            let excludedAccounts = []
-            if (body.args != null) overrides.args = body.args
-            if (body.env != null) {
-                if (!ALLOW_ENV_OVERRIDES) {
-                    return sendJson(res, 403, {
-                        error: 'Per-request env overrides are disabled. Set API_ALLOW_ENV_OVERRIDES=true to enable.'
-                    })
-                }
-                overrides.env = body.env
-            }
-            try {
-                if (body.accountIndex != null && body.excludedAccountIndexes != null) {
-                    return sendJson(res, 400, {
-                        error: '`accountIndex` and `excludedAccountIndexes` cannot be used together.',
-                        code: 'BAD_REQUEST'
-                    })
-                }
-                if (body.accountIndex != null) {
-                    const selection = buildSingleAccountEnv(body.accountIndex)
-                    overrides.env = { ...(overrides.env || {}), ...selection.env }
-                    selectedAccount = selection.account
-                } else if (body.excludedAccountIndexes != null) {
-                    const selection = buildExcludedAccountsEnv(body.excludedAccountIndexes)
-                    overrides.env = { ...(overrides.env || {}), ...selection.env }
-                    excludedAccounts = selection.excludedAccounts
-                }
-                const info = pm.start(overrides)
-                return sendJson(res, 202, { started: true, selectedAccount, excludedAccounts, ...info })
-            } catch (err) {
-                if (err.code === 'ALREADY_RUNNING') return sendJson(res, 409, { error: err.message, code: err.code })
-                if (err.code === 'BAD_REQUEST') return sendJson(res, 400, { error: err.message, code: err.code })
-                return sendJson(res, 500, { error: err.message })
-            }
-        }
-
-        // kill proc
-        if (method === 'POST' && pathname === '/stop') {
-            const body = await readJsonObject(req)
-            const force = readForce(body)
-            try {
-                if (smartScheduler.get().running.length) {
-                    void smartScheduler.stop()
-                    if (pm.getStatus().state === 'idle')
-                        return sendJson(res, 202, { stopping: true, force, smart: true })
-                }
-                const stopping = pm.stop({ force })
-                stopping.catch(() => {})
-                return sendJson(res, 202, { stopping: true, force })
-            } catch (err) {
-                if (err.code === 'NOT_RUNNING') return sendJson(res, 409, { error: err.message, code: err.code })
-                return sendJson(res, 500, { error: err.message })
-            }
-        }
-
-        // restart
-        if (method === 'POST' && pathname === '/restart') {
-            const body = await readJsonObject(req)
-            if (smartScheduler.get().effectiveEnabled) {
-                if (body.args != null || body.env != null || body.excludedAccountIndexes != null) {
-                    return sendJson(res, 400, {
-                        error: 'Smart mode does not accept args, env, or excludedAccountIndexes.',
-                        code: 'BAD_REQUEST'
-                    })
-                }
-                if (smartScheduler.get().running.length) await smartScheduler.stop()
-                const indexes = body.accountIndex == null ? null : [Number(body.accountIndex)]
-                const smart = smartScheduler.trigger(indexes, { force: true })
-                return sendJson(res, 202, { restarted: true, smart: true, queue: smart.queue, running: smart.running })
-            }
-            if (smartScheduler.get().running.length) {
-                return sendJson(res, 409, {
-                    error: 'Wait for active Smart Scheduler sessions to stop before restarting in legacy mode.',
-                    code: 'SMART_RUN_ACTIVE'
-                })
-            }
-            if (manualSessionManager.list().length) {
-                return sendJson(res, 409, {
-                    error: 'Close all manual browser sessions before restarting in legacy mode.',
-                    code: 'MANUAL_SESSION_ACTIVE'
-                })
-            }
-            const overrides = { force: readForce(body) }
-            let selectedAccount = null
-            let excludedAccounts = []
-            if (body.args != null) overrides.args = body.args
-            if (body.env != null) {
-                if (!ALLOW_ENV_OVERRIDES) {
-                    return sendJson(res, 403, {
-                        error: 'Per-request env overrides are disabled. Set API_ALLOW_ENV_OVERRIDES=true to enable.'
-                    })
-                }
-                overrides.env = body.env
-            }
-            try {
-                if (body.accountIndex != null && body.excludedAccountIndexes != null) {
-                    return sendJson(res, 400, {
-                        error: '`accountIndex` and `excludedAccountIndexes` cannot be used together.',
-                        code: 'BAD_REQUEST'
-                    })
-                }
-                if (body.accountIndex != null) {
-                    const selection = buildSingleAccountEnv(body.accountIndex)
-                    overrides.env = { ...(overrides.env || {}), ...selection.env }
-                    selectedAccount = selection.account
-                } else if (body.excludedAccountIndexes != null) {
-                    const selection = buildExcludedAccountsEnv(body.excludedAccountIndexes)
-                    overrides.env = { ...(overrides.env || {}), ...selection.env }
-                    excludedAccounts = selection.excludedAccounts
-                }
-                const info = await pm.restart(overrides)
-                return sendJson(res, 202, { restarted: true, selectedAccount, excludedAccounts, ...info })
-            } catch (err) {
-                if (err.code === 'BAD_REQUEST') return sendJson(res, 400, { error: err.message, code: err.code })
-                return sendJson(res, 500, { error: err.message })
-            }
-        }
-
-        // conf
-        if ((method === 'PUT' || method === 'PATCH') && pathname === '/config') {
-            if (!ALLOW_CONFIG_WRITE) {
-                return sendJson(res, 403, {
-                    error: 'Config writes are disabled. Set API_ALLOW_CONFIG_WRITE=true to enable.'
-                })
-            }
-            const body = await readJsonBody(req)
-            if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-                return sendJson(res, 400, { error: 'Body must be a JSON object.' })
-            }
-            let candidate
-            try {
-                candidate = method === 'PATCH' ? deepMerge(readConfig(projectRoot).data, body) : body
-            } catch (err) {
-                return sendJson(res, err.code === 'BAD_REQUEST' ? 400 : 500, {
-                    error: `Could not prepare config update: ${err instanceof Error ? err.message : err}`
-                })
-            }
-            const result = await validateConfig(candidate, {
-                projectRoot,
-                validatorModule: envStr('API_VALIDATOR_MODULE')
-            })
-            if (!result.ok) {
-                return sendJson(res, 422, { error: 'Config validation failed', via: result.via, errors: result.errors })
-            }
-            try {
-                const written = writeConfigAtomic(projectRoot, result.value ?? candidate)
-                pm.note('info', `config.json updated via API (${method}); applies on the next run.`)
-                return sendJson(res, 200, { ok: true, path: written, via: result.via, appliesOnNextRun: true })
-            } catch (err) {
-                return sendJson(res, 500, {
-                    error: `Could not write config: ${err instanceof Error ? err.message : err}`
-                })
-            }
-        }
-
-        // stop api
-        if (method === 'POST' && pathname === '/shutdown') {
-            const body = await readJsonObject(req)
-            const force = readForce(body)
-            sendJson(res, 202, { shuttingDown: true, stoppingBot: pm.getStatus().state !== 'idle' })
-            setTimeout(() => void shutdown('API /shutdown', { force }), 50)
+        ) {
             return
         }
+
+        const handled = await dispatchApiRoutes({
+            req,
+            res,
+            url,
+            method,
+            pathname,
+            sendJson,
+            readJsonBody,
+            readJsonObject,
+            projectRoot,
+            pkgName,
+            pkgVersion,
+            tokenSet: Boolean(TOKEN),
+            revealEnabled: REVEAL_ENABLED,
+            allowConfigWrite: ALLOW_CONFIG_WRITE,
+            allowScheduleWrite: ALLOW_SCHEDULE_WRITE,
+            allowAccountWrite: ALLOW_ACCOUNT_WRITE,
+            allowEnvOverrides: ALLOW_ENV_OVERRIDES,
+            startedAt,
+            getStatus,
+            getSmartState,
+            pm,
+            logBuffer: LOG_BUFFER,
+            runHistory: RUN_HISTORY,
+            toHistoryRecord,
+            loadConfigSafe,
+            containsControlCharacters,
+            diagDir: DIAG_DIR,
+            handleEventStream,
+            shutdown,
+            accountIpChecker,
+            hybrid,
+            smartScheduler,
+            manualSessionManager,
+            syncManualLock,
+            refreshManualLocks,
+            publicAndroidSession,
+            publicAndroidSessions
+        })
+        if (handled) return
 
         return sendJson(res, 404, { error: 'Not found', path: pathname })
     } catch (err) {
+        if (err?.code && Number.isInteger(err.status) && err.status >= 400 && err.status < 500) {
+            return sendJson(res, err.status, {
+                error: err.message,
+                code: err.code,
+                ...(err.nextEligibleAt !== undefined ? { nextEligibleAt: err.nextEligibleAt } : {})
+            })
+        }
         if (err && (err.code === 'BAD_JSON' || err.code === 'BODY_TOO_LARGE' || err.code === 'BAD_REQUEST')) {
             return sendJson(res, 400, { error: err.message, code: err.code })
         }
         log('ERROR', 'Unhandled request error:', err instanceof Error ? err.stack : err)
         if (!res.headersSent) return sendJson(res, 500, { error: 'Internal server error' })
     }
-}
-
-function clampInt(value, min, max, fallback) {
-    const n = parseInt(value, 10)
-    if (!Number.isFinite(n)) return fallback
-    return Math.max(min, Math.min(max, n))
-}
-
-// diagn
-const DIAG_FILES = {
-    'screenshot.png': 'image/png',
-    'error.txt': 'text/plain; charset=utf-8',
-    'dump.html': 'application/octet-stream'
-}
-
-function listDiagnostics() {
-    let dirents
-    try {
-        dirents = fs
-            .readdirSync(DIAG_DIR, { withFileTypes: true })
-            .filter(d => d.isDirectory() && d.name.startsWith('error-'))
-    } catch {
-        return { dir: DIAG_DIR, count: 0, entries: [] }
-    }
-    const entries = dirents
-        .map(d => {
-            const full = path.join(DIAG_DIR, d.name)
-            let files = []
-            let createdAt = null
-            let error = null
-            try {
-                files = fs.readdirSync(full)
-            } catch {}
-            try {
-                createdAt = fs.statSync(full).mtime.toISOString()
-            } catch {}
-            if (files.includes('error.txt')) {
-                try {
-                    error = fs.readFileSync(path.join(full, 'error.txt'), 'utf8').slice(0, 2000)
-                } catch {}
-            }
-            return {
-                name: d.name,
-                createdAt,
-                hasScreenshot: files.includes('screenshot.png'),
-                hasHtml: files.includes('dump.html'),
-                hasError: files.includes('error.txt'),
-                error
-            }
-        })
-        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
-    return { dir: DIAG_DIR, count: entries.length, entries }
-}
-
-function serveDiagnosticFile(res, pathname) {
-    let parts
-    try {
-        parts = pathname.slice('/diagnostics/'.length).split('/').filter(Boolean).map(decodeURIComponent)
-    } catch {
-        return sendJson(res, 400, { error: 'Invalid diagnostics path encoding' })
-    }
-    if (parts.length !== 2) return sendJson(res, 404, { error: 'Not found' })
-    const [name, file] = parts
-    if (!/^error-[A-Za-z0-9._:-]+$/.test(name) || !(file in DIAG_FILES)) {
-        return sendJson(res, 400, { error: 'Invalid diagnostics path' })
-    }
-    const full = path.join(DIAG_DIR, name, file)
-    if (!path.resolve(full).startsWith(path.resolve(DIAG_DIR) + path.sep)) {
-        return sendJson(res, 400, { error: 'Invalid diagnostics path' })
-    }
-    if (!fs.existsSync(full)) return sendJson(res, 404, { error: 'Not found' })
-    const headers = { 'Content-Type': DIAG_FILES[file] }
-    if (file === 'dump.html') headers['Content-Disposition'] = `attachment; filename="${name}-dump.html"`
-    res.writeHead(200, headers)
-    fs.createReadStream(full).pipe(res)
 }
 
 // startup

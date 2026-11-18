@@ -11,15 +11,25 @@ export const EARN_TASK_CONTROLS = `${DAILY_SET_LINKS}, ${MORE_ACTIVITIES_LINKS}`
 export async function readEarnPage(page: Page) {
     // Rewards lazily renders sections below the viewport (especially in mobile
     // account contexts). Read each visible section after scrolling it into view.
-    const observed = new Map<number, Awaited<ReturnType<typeof readRewardCards>>[number]>()
+    const observed = new Map<string, Awaited<ReturnType<typeof readRewardCards>>[number]>()
     const capture = async () => {
         for (const card of await readRewardCards(page, page.locator(EARN_TASK_CONTROLS)))
-            if (card.visible) observed.set(card.index, card)
+            if (card.visible)
+                observed.set(JSON.stringify([card.section, card.offerIds, card.destination, card.title]), card)
     }
     await capture()
-    for (const section of (await page.locator('#dailyset:visible, #exploreonbing:visible, #moreactivities:visible').all()).slice(0, 8)) {
+    for (const section of (
+        await page.locator('#dailyset:visible, #exploreonbing:visible, #moreactivities:visible').all()
+    ).slice(0, 8)) {
+        for (const toggle of await section.locator('button[aria-expanded="false"]').all()) {
+            await toggle.click({ timeout: 3000 }).catch(() => {})
+        }
         await section.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
-        await section.locator('h3, .promo-title').first().waitFor({ state: 'visible', timeout: 3000 }).catch(() => {})
+        await section
+            .locator('h3, .promo-title')
+            .first()
+            .waitFor({ state: 'visible', timeout: 3000 })
+            .catch(() => {})
         await capture()
     }
     const cards = [...observed.values()]

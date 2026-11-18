@@ -81,6 +81,13 @@ function getDb(sessionPath: string): DatabaseSync {
     return db
 }
 
+function hasValidBingAuth(storageState: StorageState | null): boolean {
+    if (!storageState?.cookies?.length) return false
+    return storageState.cookies.some(
+        c => (c.name === '_U' && Boolean(c.value)) || (c.name === 'RPSSecAuth' && Boolean(c.value))
+    )
+}
+
 export function loadSession(
     sessionPath: string,
     email: string,
@@ -92,13 +99,11 @@ export function loadSession(
         .prepare('SELECT storage_state, fingerprint, updated_at FROM sessions WHERE email = ? AND platform = ?')
         .get(email, platformOf(isMobile)) as SessionRow | undefined
 
-    if (!row) return null
-
-    if (maxAgeMs && Date.now() - row.updated_at > maxAgeMs) {
+    if (row && maxAgeMs && Date.now() - row.updated_at > maxAgeMs) {
         return null
     }
 
-    const storedState = row.storage_state ? (JSON.parse(row.storage_state) as StorageState) : null
+    const storedState = row?.storage_state ? (JSON.parse(row.storage_state) as StorageState) : null
     const sanitized = storedState ? removeExpiredCookies(storedState) : { storageState: null, expiredCookiesRemoved: 0 }
 
     if (sanitized.expiredCookiesRemoved) {
@@ -107,11 +112,33 @@ export function loadSession(
             .run(JSON.stringify(sanitized.storageState), email, platformOf(isMobile))
     }
 
+    let finalStorageState = sanitized.storageState
+    let updatedAt = row?.updated_at ?? Date.now()
+    let expiredCookiesRemoved = sanitized.expiredCookiesRemoved
+
+    if (!hasValidBingAuth(finalStorageState)) {
+        const otherPlatform = platformOf(!isMobile)
+        const otherRow = database
+            .prepare('SELECT storage_state, updated_at FROM sessions WHERE email = ? AND platform = ?')
+            .get(email, otherPlatform) as SessionRow | undefined
+        if (otherRow?.storage_state && (!maxAgeMs || Date.now() - otherRow.updated_at <= maxAgeMs)) {
+            const otherStored = JSON.parse(otherRow.storage_state) as StorageState
+            const otherSanitized = removeExpiredCookies(otherStored)
+            if (hasValidBingAuth(otherSanitized.storageState)) {
+                finalStorageState = otherSanitized.storageState
+                updatedAt = otherRow.updated_at
+                expiredCookiesRemoved = otherSanitized.expiredCookiesRemoved
+            }
+        }
+    }
+
+    if (!row && !finalStorageState) return null
+
     return {
-        storageState: sanitized.storageState,
-        fingerprint: row.fingerprint ? (JSON.parse(row.fingerprint) as BrowserIdentitySnapshot) : null,
-        updatedAt: row.updated_at,
-        expiredCookiesRemoved: sanitized.expiredCookiesRemoved
+        storageState: finalStorageState,
+        fingerprint: row?.fingerprint ? (JSON.parse(row.fingerprint) as BrowserIdentitySnapshot) : null,
+        updatedAt,
+        expiredCookiesRemoved
     }
 }
 

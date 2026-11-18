@@ -64,8 +64,11 @@ export class ClaimReward extends BaseActivity {
                 return
             }
             const freshHtml = await this.bot.browser.func.getRewardsPageHtml(questUrl, `/earn/quest/${parentId}`)
-            const fresh = freshHtml ? this.bot.browser.react.snapshotQuestPage(freshHtml).find(item => item.offerId === child.offerId) : undefined
-            const progress = fresh && fresh.points === child.points ? pointDelta(child.pointProgress, fresh.pointProgress) : null
+            const fresh = freshHtml
+                ? this.bot.browser.react.snapshotQuestPage(freshHtml).find(item => item.offerId === child.offerId)
+                : undefined
+            const progress =
+                fresh && fresh.points === child.points ? pointDelta(child.pointProgress, fresh.pointProgress) : null
             const gained = acknowledged ? creditedPoints(progress, oldBalance, newBalance) : null
 
             this.bot.logger.debug(

@@ -217,12 +217,15 @@ class Browser {
 
             const context = await browser.newContext({
                 permissions: [],
-                ...(preRewards ? { serviceWorkers: 'block' as const } : {}),
+                ...(preRewards || this.bot.normalSession?.active ? { serviceWorkers: 'block' as const } : {}),
                 ignoreHTTPSErrors: ignoreCertificateErrors,
                 ...(session?.storageState ? { storageState: session.storageState } : {}),
                 ...this.userAgentManager.contextOptions(fingerprint, this.bot.accountLocale)
             })
-            if (preRewards) await installPreRewardsGuard(context, { onBlocked: location => this.bot.logger.info(this.bot.isMobile, 'PRE-REWARDS-BLOCKED', location) })
+            if (preRewards)
+                await installPreRewardsGuard(context, {
+                    onBlocked: location => this.bot.logger.info(this.bot.isMobile, 'PRE-REWARDS-BLOCKED', location)
+                })
             this.bot.trackBrowserContext(context, account.email, this.bot.isMobile)
             context.once('close', () => void closeProxyLease())
             browser.once('disconnected', () => void closeProxyLease())

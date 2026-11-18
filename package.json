@@ -1,6 +1,6 @@
 {
     "name": "microsoft-rewards-script",
-    "version": "4.3.2",
+    "version": "4.3.11",
     "description": "Automatically do tasks for Microsoft Rewards but in TS!",
     "author": "Netsky",
     "license": "GPL-3.0-or-later",
@@ -10,7 +10,7 @@
     "scripts": {
         "pre-build": "npm i && rimraf dist && npx patchright install chromium",
         "install:browser": "npx patchright install chromium",
-        "build": "rimraf dist && tsc && node ./scripts/main/copyAssets.js",
+        "build": "rimraf dist && tsc && node ./scripts/main/copyAssets.js && node ./scripts/release/contracts.js",
         "start": "node ./dist/index.js",
         "ts-start": "ts-node ./src/index.ts",
         "dev": "ts-node ./src/index.ts -dev",
@@ -19,13 +19,15 @@
         "create-docker": "docker build -t microsoft-rewards-script-docker .",
         "lint": "eslint .",
         "lint:fix": "eslint . --fix",
+        "test": "npm run build && node --test scripts/api/*.test.js scripts/main/*.test.js scripts/worker/*.test.js scripts/learning/*.test.js scripts/release/*.test.js",
         "test:log-parser": "node --test scripts/api/logParser.test.js",
         "test:new-account": "node --test scripts/api/newAccount.test.js scripts/api/preRewardsGuard.test.js scripts/api/rewardsOnboarding.test.js scripts/api/newAccountServices.test.js",
         "test:search-quota": "node --test scripts/api/searchQuota.test.js",
-        "test:rewards-activities": "node --test scripts/api/rewardsActivities.test.js scripts/api/morePromotions.test.js scripts/api/activityVerification.test.js scripts/api/upstreamRewards.test.js",
+        "test:rewards-activities": "node --test scripts/api/rewardsActivities.test.js scripts/api/morePromotions.test.js scripts/api/activityVerification.test.js scripts/api/upstreamRewards.test.js scripts/api/earnClick.test.js",
         "test:urgent-api": "node --test scripts/api/urgentApi.test.js",
         "test:urgent-execution": "node --test scripts/api/urgentExecution.test.js",
         "test:smart-scheduler": "node --test scripts/api/smartScheduler.test.js",
+        "test:normal-sessions": "node --test scripts/api/normalSession.test.js scripts/api/smartScheduler.test.js",
         "test:hybrid": "node --test scripts/api/hybrid.test.js scripts/api/hybridApi.test.js scripts/api/botCheckpoint.test.js",
         "test:account-store": "node --test scripts/api/accountStore.test.js",
         "test:account-ip": "node --test scripts/api/accountIpChecker.test.js",
@@ -44,7 +46,8 @@
         "worker": "node --env-file-if-exists=worker.env scripts/worker/server.js",
         "build:contracts": "node scripts/release/contracts.js",
         "release:worker": "node scripts/release/worker.js",
-        "test:worker": "node --test scripts/worker/*.test.js"
+        "test:worker": "node --test scripts/worker/*.test.js",
+        "test:learning": "node --test scripts/learning/*.test.js"
     },
     "keywords": [
         "Bing Rewards",

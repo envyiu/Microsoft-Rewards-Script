@@ -1,11 +1,22 @@
 import { REWARDS_BASE_URL } from '../constants/urls'
 import { type Page, type BrowserContext } from 'patchright'
-import { ClickOptions, createCursor } from 'ghost-cursor-playwright-port'
+import { ClickOptions, createCursor, type GhostCursor } from 'ghost-cursor-playwright-port'
 
 import type { MicrosoftRewardsBot } from '../index'
 
 export default class BrowserUtils {
     private bot: MicrosoftRewardsBot
+    private cursors = new WeakMap<Page, GhostCursor>()
+
+    cursor(page: Page): GhostCursor {
+        let cursor = this.cursors.get(page)
+        if (!cursor) {
+            // The library accepts Playwright pages; Patchright provides the same runtime API.
+            cursor = createCursor(page as any) // eslint-disable-line @typescript-eslint/no-explicit-any
+            this.cursors.set(page, cursor)
+        }
+        return cursor
+    }
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
@@ -214,9 +225,7 @@ export default class BrowserUtils {
 
             await page.waitForSelector(selector, { timeout: 1000 }).catch(() => {})
 
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const cursor = createCursor(page as any)
-            await cursor.click(selector, options)
+            await this.cursor(page).click(selector, options)
 
             return true
         } catch (error) {

@@ -103,6 +103,7 @@ export interface RenderedRewardCard {
     section: string
     visible: boolean
     disabled: boolean
+    lockIcon?: boolean
     complete: boolean
     points: number
     hasPointsBadge: boolean
@@ -154,7 +155,9 @@ export async function readRewardCards(page: Page, controls: Locator): Promise<Re
                 visible:
                     style.visibility !== 'hidden' && style.display !== 'none' && element.getClientRects().length > 0,
                 disabled: Boolean(
-                    element.closest('[aria-disabled="true"], [data-disabled], [disabled], [inert]') ||
+                    element.closest('[aria-disabled="true"], [data-disabled="true"], [disabled], [inert]')
+                ),
+                lockIcon: Boolean(
                     card.querySelector('.locked_point, .locked_level_required_text, #locked_level_required_text')
                 ),
                 complete: Boolean(card.querySelector('.bg-statusSuccessRewardsBg')),

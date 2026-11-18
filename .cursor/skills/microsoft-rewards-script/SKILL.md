@@ -33,21 +33,23 @@ scripts/worker/server.js -> WorkerAgent -> scripts/api/server.js -> SmartSchedul
 packages/contracts -> pure schema/protocol/account/store helpers, packaged into Manager without browser imports
 scripts/docker/entrypoint.sh / scripts/api/fleet.js -> legacy deployment only
 ```
+
 Use these entry points to choose the smallest safe change:
 
-| Task | Start here | Then read |
-| --- | --- | --- |
-| Login, OAuth, 2FA, bot warning | `src/browser/auth/Login.ts` | `ARCHITECTURE.md` auth section; `OPERATIONS.md` login recovery |
-| Cookies, fingerprint, proxy, session | `src/browser/Browser.ts`, `src/util/SessionStore.ts` | `ARCHITECTURE.md` browser/session section |
-| Dashboard, Rewards page, RSC, server action | `src/browser/BrowserFunc.ts`, `src/browser/ReactFunc.ts` | `ARCHITECTURE.md` Rewards/RSC section |
-| Daily Set, offers, punchcards, streaks | `src/functions/activities/` | `ARCHITECTURE.md` activity section |
-| New Outlook/Hotmail accounts, seven-day pre-Rewards mode, first-visit setup | `src/functions/NewAccount.ts`, `src/functions/RewardsOnboarding.ts` | `ARCHITECTURE.md` system boundary; `OPERATIONS.md` standalone deployment |
-| Search quota or mobile/desktop scheduling | `src/functions/SearchManager.ts`, `SearchProgress.ts` | `ARCHITECTURE.md` search section; `DEVELOPMENT.md` quota invariants |
-| Search query generation | `src/functions/QueryEngine.ts`, `SearchQueryQueue.ts` | `ARCHITECTURE.md` query section |
-| Docker, cron, scheduling | `scripts/docker/`, `compose.yaml` | `OPERATIONS.md` execution modes |
-| Control API | `scripts/api/` | `scripts/api/README.md`, then `ARCHITECTURE.md` API section |
-| Log parsing or API status | `src/logging/Logger.ts`, `scripts/api/logParser.js` | `DEVELOPMENT.md` log contract |
-| Config/account/env | `src/contracts/BotConfig.ts`, `src/util/Load.ts`, `src/interface/`, `config.example.json` | `OPERATIONS.md` precedence and safety |
+| Task                                                                        | Start here                                                                                | Then read                                                                |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Login, OAuth, 2FA, bot warning                                              | `src/browser/auth/Login.ts`                                                               | `ARCHITECTURE.md` auth section; `OPERATIONS.md` login recovery           |
+| Cookies, fingerprint, proxy, session                                        | `src/browser/Browser.ts`, `src/util/SessionStore.ts`                                      | `ARCHITECTURE.md` browser/session section                                |
+| Dashboard, Rewards page, RSC, server action                                 | `src/browser/BrowserFunc.ts`, `src/browser/ReactFunc.ts`                                  | `ARCHITECTURE.md` Rewards/RSC section                                    |
+| Daily Set, offers, punchcards, streaks                                      | `src/functions/activities/`                                                               | `ARCHITECTURE.md` activity section                                       |
+| New Outlook/Hotmail accounts, seven-day pre-Rewards mode, first-visit setup | `src/functions/NewAccount.ts`, `src/functions/RewardsOnboarding.ts`                       | `ARCHITECTURE.md` system boundary; `OPERATIONS.md` standalone deployment |
+| Search quota or mobile/desktop scheduling                                   | `src/functions/SearchManager.ts`, `SearchProgress.ts`                                     | `ARCHITECTURE.md` search section; `DEVELOPMENT.md` quota invariants      |
+| Search query generation                                                     | `src/functions/QueryEngine.ts`, `SearchQueryQueue.ts`                                     | `ARCHITECTURE.md` query section                                          |
+| Docker, cron, scheduling                                                    | `scripts/docker/`, `compose.yaml`                                                         | `OPERATIONS.md` execution modes                                          |
+| Cloud Sandbox, relay, restart or backup                                     | `scripts/worker/sandbox-cloud/`                                                           | `OPERATIONS.md` Sandbox section and its runbook                          |
+| Control API                                                                 | `scripts/api/`                                                                            | `scripts/api/README.md`, then `ARCHITECTURE.md` API section              |
+| Log parsing or API status                                                   | `src/logging/Logger.ts`, `scripts/api/logParser.js`                                       | `DEVELOPMENT.md` log contract                                            |
+| Config/account/env                                                          | `src/contracts/BotConfig.ts`, `src/util/Load.ts`, `src/interface/`, `config.example.json` | `OPERATIONS.md` precedence and safety                                    |
 
 ## Mandatory workflow
 
@@ -65,11 +67,14 @@ Use these entry points to choose the smallest safe change:
 - Environment account slots are sparse and numeric (`ACCOUNT_N_EMAIL`); the loader sorts slot numbers and validates each account. Never assume accounts are contiguous or expose passwords/tokens in logs/API responses.
 - Session reuse is a feature, not a cache to bypass casually. Cookie changes and optional fingerprints are checkpointed through `SessionStore`; preserve the mobile/desktop distinction and account identity.
 - New-account mode must branch before Rewards login/bootstrap and point-based search. Preserve its absolute 168-hour deadline and query checkpoints through handoff, restart and midnight. Keep the shared context guard active in manual windows; do not remove it to work around a Microsoft service redirect. See `test:new-account` and the capability gate before importing new accounts onto a worker.
+- In new-account warmup, distinguish reserved search attempts from verified completions. Preserve the daily 30 desktop / 20 mobile attempt budgets and `queryCapsReached`; an uncertain result consumes a reservation and is not a login failure. Rewards-account daily caps remain unknown and must not be inferred from warmup limits.
+- The current cloud Sandbox uses Docker and a separate SSH gateway through the regular relay VPS, not the systemd installer. Preserve worker identity, persistent data and private gateway keys; never reassign accounts merely because the tunnel is down. The Manager tunnel and the restricted proxy-egress tunnel are separate; keep egress bound to loopback, limit its SSH key to the six configured proxy ports, and keep the Worker startup gate. Read the Sandbox runbook before maintenance.
 - Manual Desktop/Mobile/Android locks are per account, even when another account shares the proxy. Only the selected account's active job makes the request wait. Do not move/stop its proxy siblings or wait for the whole worker. Ordinary explicit assignment moves remain group based.
 - A running worker may accept membership-only snapshots only when retained account environments/profiles and node settings remain unchanged and removed accounts are held/not running. Use the existing compatibility check; configuration changes still drain as required.
 - `MRS_CONFIG_FILE` and `MRS_SKIP_ENV_FILE=1` must also reach manual helpers. A standalone worker must not fall back to a source checkout's `config.json` or account `.env`.
 - Android retains its account-bound Damru device/login; these are separate from desktop/mobile browser cookies. Return automatic execution only after device stop, not viewer closure. Failed/unknown checkpoints keep durable holds.
 - Manager uses `3012`, dashboard `8890`, worker `3010`, all loopback by default. Account import belongs to Manager; a worker's public account/config writes are intentionally denied.
+- Keep earning lock artwork is not a disabled control. Click enabled point cards through the native Rewards control, including YouTube/puzzle and missing-hash cards; verify freshly and retain bounded same-day rediscovery. See `RenderedEarnActions` and the Rewards regression matrix.
 - Rendered Earn/Quest verification uses the adapted v5 parsers in `src/browser/parsers/`; preserve unique signed-offer matching, unknown credit, streak expiry and the existing versioned journal contract. Never replace custom Manager/Worker scheduling with upstream Control API.
 - Rewards pages are Next.js/RSC-driven. If a selector or server action changes, update the bootstrap/parser/recovery path rather than adding an unrelated one-off request.
 - Search counters, search plans, worker caps and “probe on zero quota” behavior are coupled. Read `SearchProgress`, `SearchManager`, `BrowserSearch` and `ApiSearch` together before changing quota logic.
@@ -77,6 +82,10 @@ Use these entry points to choose the smallest safe change:
 - Logger titles and message shapes are machine-consumed. When changing them, inspect `scripts/api/logParser.js` and its tests before committing.
 - Assets under `src/functions/*.json` are copied to `dist/functions/` by `scripts/main/copyAssets.js`; build output is not a place to fix source behavior.
 - API writes can mutate mounted configuration and schedules. Treat `/config`, `/schedule`, `/start`, `/stop`, `/restart`, `/shutdown` and session deletion as state-changing operations; preserve the auth and opt-in guards.
+
+## Scheduler learning data
+
+Read [collector operations](../../../scripts/learning/README.md) before changing telemetry, experiments, export or training preparation. Keep the training store separate from business events, omit secrets/query text, preserve retry UUIDs and ACK deduplication, and split data by collection time. Unknown daily query caps stay unset and block search-budget trials; collection days alone never authorize AI control.
 
 ## Validation baseline
 
@@ -103,3 +112,7 @@ Verified: <commands and outcomes>
 Risk: <live-account/Docker/API/environment caveats>
 Next: <only if a human decision or environment step remains>
 ```
+
+## Conservative Smart policy
+
+For Smart scheduler/search changes, read the final **Conservative Rewards sessions** section in `ARCHITECTURE.md` and its regression matrix in `DEVELOPMENT.md`. Default Rewards plans are `accountSession`; preserve the rolling start ledger, per-query reservations and holds in the handoff planner. Retry/Urgent/learning cannot replenish them. Legacy quota/Earn-only jobs and zero-quota probes are not part of this default policy. Follow [Smart Mode](../../../docs/SMART_MODE_VI.md) for operator release and paused rollout/rollback.

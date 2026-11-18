@@ -17,7 +17,27 @@ New installations use separate Manager and Worker archives. Follow [Worker insta
 - Browser session/fingerprint/region are preserved during temporary handoff. Damru's account-bound native Android login is separate; stop the device to return ownership. Closing its viewer is insufficient.
 - Offline changes stay Pending until the worker acknowledges the desired revision. Workers continue accepted Smart schedules when Manager is offline. Never infer Running from stale logs or cached rosters, or fail over an offline account automatically.
 
+Native Windows Workers (Windows 10 and the configured Windows Server 2016 target)
+are separate headless remote executors installed under
+`%LOCALAPPDATA%\MSRWWorker`, including its private Node runtime and Chromium.
+See the [Windows runbook](../../../scripts/worker/windows/README.md) for user
+sign-in or batch-task autostart, Job Object cleanup, relay access and maintenance limitations.
+Do not use the Linux/systemd installer or upgrade button for this machine.
+
 Before an actual upgrade, pause/drain the worker and close/return manual sessions. A binary/service restart is maintenance, unlike an ordinary manual open. Preserve current data privately and verify checkpoint markers before replacing code. Never restore old cookies over newer work as a shortcut rollback.
+
+## Cloud Sandbox and relay
+
+The current Docker cloud Sandbox has no systemd. Its worker and separate access gateway run as Docker containers; Manager reaches the loopback-only worker API through the regular relay VPS. Use the [Sandbox runbook](../../../scripts/worker/sandbox-cloud/README.md), not the systemd provisioning/upgrade flow. The maintenance gateway has access to the Docker socket and private data; backups include sensitive sessions and gateway keys.
+
+Diagnose separately: check local tunnel/recovery timers, relay and gateway reachability, worker health and ownership, then browser/network logs. Microsoft bootstrap timeouts or `chromewebdata` do not by themselves prove bad credentials. A warmup `queryCapsReached` state means the daily attempt budget is exhausted, not that login failed. Do not increase the budget or reset reservations to clear it.
+
+Recovery depends on Sandbox filesystem and Docker state surviving, as well as gateway/relay availability. The actual provider's scheduled 24-hour restart has not yet been verified end to end. An interrupted job is not a completed job; do not reassign offline accounts automatically.
+
+If proxy TCP connects but the SOCKS5 greeting stalls before authentication,
+compare the Sandbox and VPS transport layers first; this does not by itself
+indicate a Microsoft account login failure. Follow the restricted proxy-egress
+recovery procedure in the [Sandbox runbook](../../../scripts/worker/sandbox-cloud/README.md).
 
 ## 1. Prerequisites and first run
 
@@ -251,3 +271,48 @@ Dashboard Daily streak is separate from protection and partner streaks. Zero mea
 ### Manual browser reports Missing X server / $DISPLAY
 
 A systemd user worker can start before the graphical session and discover only a Wayland socket. Chromium must then launch with `--ozone-platform=wayland`; setting WAYLAND_DISPLAY alone does not select its backend. `scripts/main/browserDisplay.js` selects X11 when DISPLAY exists, otherwise Wayland when WAYLAND_DISPLAY exists. Test a headed browser with DISPLAY removed to reproduce this service environment. Do not change account cookies or clear sessions to repair a display failure.
+
+### Debian VPS enrollment
+
+Manager SSH provisioning accepts Debian 13 x86_64 as well as Ubuntu 24.04. Use the normal worker installer, a dedicated non-root SSH user, pinned host key and loopback-only API. A 2 GiB VPS starts with one parallel account. Under the installers’ private `umask 077`, create `/opt/msrw-node` explicitly with mode `0755` so the worker user can execute Node/npm; keep worker data and credentials private. Test Chromium readiness before assignment. Ordinary moves keep proxy groups intact and transfer browser state plus Smart/new-account progress through Manager acknowledgements.
+
+## Scheduler learning collection
+
+See [the collector contract](../../../scripts/learning/README.md) for the 28-day collection and 7-day holdout, private durable telemetry, time-based dataset preparation and quality gates. Unknown desktop/mobile daily query caps stay unset; never derive them from points or per-session budgets. Search-budget experiments remain locked without explicit caps. This collector does not activate an AI scheduler.
+
+## Conservative Smart rollout
+
+Default `schedule.normalPolicy` enables 4 sessions/rolling 24h, 90 minutes after exit, 4 compatible tasks and 5 shared query attempts. Workers require `conservativeSessionsV1`; upgrade outdated workers before applying this policy. See [Smart Mode](../../../docs/SMART_MODE_VI.md) for API blocked codes, explicit verification/process recovery release and warmup/manual exceptions. Pause/drain before upgrading, retain the latest planner/protection/query journal/session data, preserve pause, then use a user-resumed single-account canary before expansion. Observe seven days; rollback retains protection and pauses scheduling. No live rollout is implied by source changes or passing tests.
+
+### Manual Moving timeout on large sessions
+
+A hold export may exceed 60 seconds over a remote tunnel. Manager must cover
+body decoding in its timeout handling, explicitly negotiate gzip, and retain the
+account hold on `WORKER_TIMEOUT`; do not reset session data to shorten transfer.
+See the Manager architecture's manual handoff latency section. A pending manual
+HTTP response contains an operation ID; UI waits for ownership ACK before opening.
+Check `/nodes` operation phase/error instead of assuming every Moving badge means
+an active transfer. If database/configuration paths are missing while services
+remain running, recover the live private databases and verify account identities
+before restarting. Never print recovered environment/session contents.
+
+### Remote worker using its own IP
+
+An explicitly authorized remote worker can receive `proxy: null` accounts when
+its Manager node override has `allowDirectAccounts: true`. This is carried in the
+revisioned snapshot and requires a worker with the matching Hybrid handler.
+Default remote snapshots still reject direct accounts. Never emulate direct IP
+with a fake proxy or change the remote worker into the local/manual executor.
+Move session/progress through the existing handoff, then change proxy settings
+through Manager after the DIRECT group has one owner. DIRECT automatic jobs
+remain serialized; other proxied accounts keep their current routing.
+
+### Windows crash and stale dashboard progress
+
+Follow the Windows runbook's **Smart state after a crash** section. Compare actual
+worker scheduler enablement with Manager desired state, not only the revision.
+A valid SQLite database does not establish that the separate Smart JSON survived.
+Back up first; use the last-good checkpoint or evidence-limited offline journal
+recovery, preserving sessions, query reservations and event identities. Never
+silently replace unreadable progress with fresh defaults or overwrite a live
+Worker's JSON while its scheduler can save over the recovery.

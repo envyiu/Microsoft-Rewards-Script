@@ -11,6 +11,7 @@ export class PunchCards extends BaseActivity {
         try {
             await this.run(data)
         } catch (error) {
+            this.bot.normalSession?.recordRuntimeError('PUNCHCARD', error)
             this.bot.logger.error(
                 'main',
                 'PUNCHCARD',
@@ -38,6 +39,7 @@ export class PunchCards extends BaseActivity {
         try {
             await this.run(data)
         } catch (error) {
+            this.bot.normalSession?.recordRuntimeError('PUNCHCARD', error)
             this.bot.logger.error(
                 'main',
                 'PUNCHCARD',
@@ -288,19 +290,22 @@ export class PunchCards extends BaseActivity {
                     children: this.bot.browser.react.snapshotQuestPage(await page.content()),
                     page: await readPunchCardPage(page)
                 }))
-                if (rendered) for (const child of rendered.children) {
-                    const candidates = rendered.page.steps.filter(step => step.offerId
-                        ? step.offerId === child.offerId
-                        : step.controlName === child.title && step.destination === child.destination)
-                    if (candidates.length === 1) {
-                        const step = candidates[0]!
-                        child.description ||= step.description
-                        child.isCompleted ||= step.complete
-                        child.isDisabled ||= step.disabled
-                        child.reportable &&= !child.isCompleted && !child.isDisabled
+                if (rendered)
+                    for (const child of rendered.children) {
+                        const candidates = rendered.page.steps.filter(step =>
+                            step.offerId
+                                ? step.offerId === child.offerId
+                                : step.controlName === child.title && step.destination === child.destination
+                        )
+                        if (candidates.length === 1) {
+                            const step = candidates[0]!
+                            child.description ||= step.description
+                            child.isCompleted ||= step.complete
+                            child.isDisabled ||= step.disabled
+                            child.reportable &&= !child.isCompleted && !child.isDisabled
+                        }
+                        children.push(child)
                     }
-                    children.push(child)
-                }
             }
             if (!children.length) {
                 this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `No actionable children for "${title}"`)
@@ -364,8 +369,11 @@ export class PunchCards extends BaseActivity {
                 return acknowledged
             }
             const freshHtml = await this.bot.browser.func.getRewardsPageHtml(questUrl, `/earn/quest/${parentId}`)
-            const fresh = freshHtml ? this.bot.browser.react.snapshotQuestPage(freshHtml).find(item => item.offerId === child.offerId) : undefined
-            const progress = fresh && fresh.points === child.points ? pointDelta(child.pointProgress, fresh.pointProgress) : null
+            const fresh = freshHtml
+                ? this.bot.browser.react.snapshotQuestPage(freshHtml).find(item => item.offerId === child.offerId)
+                : undefined
+            const progress =
+                fresh && fresh.points === child.points ? pointDelta(child.pointProgress, fresh.pointProgress) : null
             const gained = acknowledged ? creditedPoints(progress, oldBalance, newBalance) : null
             this.bot.userData.currentPoints = newBalance
             if (gained !== null && gained > 0) {

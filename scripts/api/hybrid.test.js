@@ -161,7 +161,10 @@ test('urgent drain respects a hard node cap instead of its normal 32 job allowan
         else process.env.ACCOUNT_900001_EMAIL = saved
     })
     const scheduler = Object.create(SmartScheduler.prototype)
-    scheduler.document = { config: { enabled: true, maxParallel: 32 }, state: { accounts: {}, urgentRun: { active: true } } }
+    scheduler.document = {
+        config: { enabled: true, maxParallel: 32 },
+        state: { accounts: {}, urgentRun: { active: true } }
+    }
     scheduler.running = new Map()
     scheduler.manualLocks = new Map()
     scheduler.accountFilter = () => true

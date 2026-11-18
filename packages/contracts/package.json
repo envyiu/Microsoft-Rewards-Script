@@ -14,7 +14,8 @@
         "./smart": "./smartConfig.js",
         "./protocol": "./protocol.js",
         "./env": "./env.js",
-        "./rewards": "./rewards.cjs"
+        "./rewards": "./rewards.cjs",
+        "./release": "./workerRelease.cjs"
     },
     "dependencies": {
         "zod": "4.6.7",

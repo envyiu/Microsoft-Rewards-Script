@@ -270,7 +270,9 @@ test('targeted retry routes only selected accounts to their owner and validates 
         body: { enabled: true }
     })
     await new Promise(resolve => setTimeout(resolve, 150))
-    assert.equal((await local.request('/smart-schedule/retry', 'POST', { accountIndexes: [1] })).status, 202)
+    const retry = await local.request('/smart-schedule/retry', 'POST', { accountIndexes: [1] })
+    assert.equal(retry.status, 409)
+    assert.equal(retry.data.code, 'ALREADY_RUNNING')
     const state = await eventually(
         () => remote.request('/internal/hybrid/status'),
         r => r.data.smart.running.length === 1
@@ -329,13 +331,17 @@ test('per-account Stop checkpoints only the selected VPS job, survives restart a
     const restored = (await remote.request('/internal/hybrid/status')).data.smart
     assert.ok(restored.running.every(j => j.accountIndex !== 1))
     assert.ok(Date.parse(restored.accounts['1'].manualStopUntil) > Date.now())
-    await remote.request('/internal/hybrid/control', 'POST', { route: '/start', body: { accountIndex: 1 } })
-    const restarted = await eventually(
-        () => remote.request('/internal/hybrid/status'),
-        r => r.data.smart.running.some(j => j.accountIndex === 1)
+    const retry = await remote.request('/internal/hybrid/control', 'POST', {
+        route: '/start',
+        body: { accountIndex: 1 }
+    })
+    assert.equal(retry.status, 409)
+    assert.equal(retry.data.code, 'SESSION_REST')
+    assert.equal(
+        (await remote.request('/internal/hybrid/status')).data.smart.running.some(j => j.accountIndex === 1),
+        false
     )
-    assert.notEqual(restarted.data.smart.running.find(j => j.accountIndex === 1).executionId, first.executionId)
-    assert.equal((await local.request(route, 'POST', { jobId: first.executionId })).status, 409)
+    assert.equal(restored.accounts['1'].protection.sessions.length, 1)
 })
 
 test('unreachable VPS loses Running evidence instead of replaying its cached roster', async t => {

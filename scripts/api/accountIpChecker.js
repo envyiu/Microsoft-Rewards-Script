@@ -3,7 +3,7 @@ import { isIP } from 'node:net'
 import { Impit } from 'impit'
 
 import { createBrowserProxyConfig } from '../../common/proxyRelay.cjs'
-import { loadAccounts } from './accounts.js'
+import { loadAccounts } from '../../packages/contracts/accounts.js'
 
 const IP_ENDPOINT = 'https://api64.ipify.org?format=json'
 const FAILURE = 'Could not check the public IP. Check the proxy connection and credentials, then retry.'

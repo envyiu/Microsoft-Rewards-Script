@@ -188,7 +188,10 @@ test('HTTP client requests use the authenticated SOCKS5 relay when proxying is e
     const client = new HttpClient(accountProxy(socksPort))
 
     try {
-        const response = await client.request({ url: `http://127.0.0.1:${targetPort}/http-client-check`, responseType: 'text' })
+        const response = await client.request({
+            url: `http://127.0.0.1:${targetPort}/http-client-check`,
+            responseType: 'text'
+        })
         assert.equal(response.status, 200)
         assert.equal(response.data, 'through-authenticated-socks5')
     } finally {

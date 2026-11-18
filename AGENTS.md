@@ -21,26 +21,26 @@ This file is the short always-read contract for agents. The detailed, task-orien
 
 ## Source-of-truth map
 
-| Concern | Source of truth |
-| --- | --- |
-| Main runtime and account orchestration | `src/index.ts` |
-| Configuration shape and defaults | `src/interface/Config.ts`, `src/contracts/BotConfig.ts`, `src/util/Validator.ts`, `config.example.json` |
-| Account environment loading | `src/util/Load.ts`, `packages/contracts/accounts.js`, `src/interface/Account.ts` |
-| Browser context, fingerprint, cookies | `src/browser/Browser.ts`, `src/browser/BrowserFunc.ts`, `src/browser/BrowserUtils.ts` |
-| Authentication state machine | `src/browser/auth/Login.ts` and `src/browser/auth/methods/` |
-| Next.js/RSC and server actions | `src/browser/ReactFunc.ts`, `src/browser/BrowserFunc.ts` |
-| Rewards activities | `src/functions/activities/` and `src/functions/Activities.ts` |
-| Search quotas and scheduling | `src/functions/SearchManager.ts`, `src/functions/SearchProgress.ts` |
-| Browser/API search execution | `src/functions/activities/search/BrowserSearch.ts`, `ApiSearch.ts` |
-| Query sources and de-duplication | `src/functions/QueryEngine.ts`, `src/functions/SearchQueryQueue.ts` |
-| Session database | `src/util/SessionStore.ts` |
-| HTTP retries/proxy clients | `src/util/Http.ts`, `src/util/Proxy.ts` |
-| Logs and webhook delivery | `src/logging/Logger.ts` |
-| Docker/cron lifecycle | `scripts/docker/` and `compose.yaml` |
-| Control API | `scripts/api/` and `scripts/api/README.md` |
-| Standalone Worker / shared contracts | `scripts/worker/`, `packages/contracts/`, `scripts/release/` |
-| Manager coordination / migration | `../rewards-dashboard/manager/core.js`, `server.js`, `provisioner.js`, `scripts/migrate.js` |
-| Build-copied runtime assets | `src/functions/*.json`, `scripts/main/copyAssets.js` |
+| Concern                                | Source of truth                                                                                         |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Main runtime and account orchestration | `src/index.ts`                                                                                          |
+| Configuration shape and defaults       | `src/interface/Config.ts`, `src/contracts/BotConfig.ts`, `src/util/Validator.ts`, `config.example.json` |
+| Account environment loading            | `src/util/Load.ts`, `packages/contracts/accounts.js`, `src/interface/Account.ts`                        |
+| Browser context, fingerprint, cookies  | `src/browser/Browser.ts`, `src/browser/BrowserFunc.ts`, `src/browser/BrowserUtils.ts`                   |
+| Authentication state machine           | `src/browser/auth/Login.ts` and `src/browser/auth/methods/`                                             |
+| Next.js/RSC and server actions         | `src/browser/ReactFunc.ts`, `src/browser/BrowserFunc.ts`                                                |
+| Rewards activities                     | `src/functions/activities/` and `src/functions/Activities.ts`                                           |
+| Search quotas and scheduling           | `src/functions/SearchManager.ts`, `src/functions/SearchProgress.ts`                                     |
+| Browser/API search execution           | `src/functions/activities/search/BrowserSearch.ts`, `ApiSearch.ts`                                      |
+| Query sources and de-duplication       | `src/functions/QueryEngine.ts`, `src/functions/SearchQueryQueue.ts`                                     |
+| Session database                       | `src/util/SessionStore.ts`                                                                              |
+| HTTP retries/proxy clients             | `src/util/Http.ts`, `src/util/Proxy.ts`                                                                 |
+| Logs and webhook delivery              | `src/logging/Logger.ts`                                                                                 |
+| Docker/cron lifecycle                  | `scripts/docker/` and `compose.yaml`                                                                    |
+| Control API                            | `scripts/api/` and `scripts/api/README.md`                                                              |
+| Standalone Worker / shared contracts   | `scripts/worker/`, `packages/contracts/`, `scripts/release/`                                            |
+| Manager coordination / migration       | `../rewards-dashboard/manager/core.js`, `server.js`, `provisioner.js`, `scripts/migrate.js`             |
+| Build-copied runtime assets            | `src/functions/*.json`, `scripts/main/copyAssets.js`                                                    |
 
 ## Non-negotiable invariants
 

@@ -111,7 +111,7 @@ function questFixture({ acknowledge = true, deferred = false, disappear = false 
         logger: { ...logger, info: (_p, _t, m) => logs.push(m) },
         executionPlan: { urgent: true },
         config: { skipNonPointTasks: true, autoClaimPunchcardRewards: false },
-        utils: { randomDelay: () => 0 },
+        utils: { randomDelay: () => 0, wait: async () => {} },
         userData: { currentPoints: 100, gainedPoints: 0, timezoneOffset: '0' },
         nextActions: { reportActivity: 'fixture-action' },
         browser: {
@@ -191,7 +191,7 @@ test('Keep earning executes newly unlocked cards and does not verify omitted or 
             logger,
             config: { skipNonPointTasks: true, activities: { urlReward: true } },
             executionPlan: { urgent: true },
-            utils: { randomDelay: () => 0 },
+            utils: { randomDelay: () => 0, wait: async () => {} },
             browser: {
                 func: {
                     refreshEarnSnapshot: async () => ({
@@ -238,7 +238,7 @@ test('pending Keep earning uses an ordinary browser visit once and verifies serv
             logger,
             config: { skipNonPointTasks: true, activities: { urlReward: enabled } },
             executionPlan: { urgent: true },
-            utils: { randomDelay: () => 0 },
+            utils: { randomDelay: () => 0, wait: async () => {} },
             mainDesktopPage: { isClosed: () => false, context: () => 'same-account-context' },
             newBrowserPage: async context => {
                 assert.equal(context, 'same-account-context')

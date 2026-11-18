@@ -1,4 +1,5 @@
 import { waitForSearch } from '../../../util/ActivityTiming'
+import { emitRuntimeEvent } from '../../../util/RuntimeEvents'
 import { SearchQueryQueue } from '../../SearchQueryQueue'
 import { BaseActivity } from '../BaseActivity'
 import { BonusTracker } from '../search/BonusTracker'
@@ -26,10 +27,19 @@ export class ApiSearch extends BaseActivity {
             let quotaAvailable = initialSnapshot.quotaAvailable
             const logSmartEnd = (queries: number, remaining: number) => {
                 if (budget == null) return
+                const payload = {
+                    platform: isMobile ? 'mobile' : 'desktop',
+                    budget,
+                    queries,
+                    points: totalGained,
+                    remaining,
+                    quotaAvailable
+                }
+                emitRuntimeEvent('searchProgress', payload)
                 this.bot.logger.info(
                     isMobile,
                     'SMART-SEARCH-END',
-                    `platform=${isMobile ? 'mobile' : 'desktop'} | budget=${budget} | queries=${queries} | points=${totalGained} | remaining=${remaining} | quotaAvailable=${quotaAvailable}`
+                    `platform=${payload.platform} | budget=${budget} | queries=${queries} | points=${totalGained} | remaining=${remaining} | quotaAvailable=${quotaAvailable}`
                 )
             }
             this.bot.logger.info(
@@ -92,7 +102,7 @@ export class ApiSearch extends BaseActivity {
                     break
                 }
 
-                const res = await this.searchApi.report(query)
+                const res = await this.searchApi.report(query, { telemetryKind: 'normal' })
                 performed++
 
                 if (!res.ig) {
@@ -256,7 +266,9 @@ export class ApiSearch extends BaseActivity {
                     break
                 }
 
-                const res = await this.searchApi.report(query)
+                const res = await this.searchApi.report(query, {
+                    telemetryKind: /bonus/i.test(tracker.context) ? 'bonus' : 'normal'
+                })
                 performed++
 
                 if (!res.ig) {

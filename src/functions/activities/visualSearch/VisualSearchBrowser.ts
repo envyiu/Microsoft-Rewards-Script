@@ -1,5 +1,7 @@
 import type { BrowserContext, Page } from 'patchright'
 
+import { learningQuery } from '../../../util/Learning'
+
 import { URLs } from '../../../constants/urls'
 import type { MicrosoftRewardsBot } from '../../../index'
 
@@ -67,7 +69,9 @@ export class VisualSearchBrowser {
                 )
                 .catch(() => null)
 
-            await visualPage.goto(candidate.serpUrl, { waitUntil: 'domcontentloaded', timeout: 20000 })
+            await learningQuery('visual', this.bot.isMobile, () =>
+                visualPage!.goto(candidate.serpUrl, { waitUntil: 'domcontentloaded', timeout: 20000 })
+            )
             const response = await responsePromise
             if (!response) {
                 this.bot.logger.warn(

@@ -131,6 +131,12 @@ export class ManualSessionManager extends EventEmitter {
             if (entry.level === 'error' || entry.source === 'stderr') {
                 failureDetail = String(entry.message ?? entry.raw ?? '').trim() || null
             }
+            if (
+                /^\[SUCCESS\] Manual browser checkpoint complete\s*$/.test(
+                    String(entry.raw ?? entry.message ?? '').trim()
+                )
+            )
+                record.checkpointSaved = true
             if (!ready && READY_LOG_RE.test(String(entry.raw ?? entry.message ?? ''))) {
                 ready = true
                 record.ready = true
@@ -142,7 +148,12 @@ export class ManualSessionManager extends EventEmitter {
             clearStartup()
             this.sessions.delete(key)
             this.onAccountChange(index, this.hasAccount(index))
-            this.emit('change', { type: 'exit', session: this._public(record), exit })
+            this.emit('change', {
+                type: 'exit',
+                session: this._public(record),
+                exit,
+                checkpointSaved: record.checkpointSaved === true
+            })
             if (!ready && !settled) {
                 settled = true
                 rejectStartup(
@@ -154,7 +165,9 @@ export class ManualSessionManager extends EventEmitter {
         })
 
         try {
-            manager.start({ env: { ...resolveManualBrowserEnvironment(), MRS_PRE_REWARDS_GUARD: preRewards ? '1' : '0' } })
+            manager.start({
+                env: { ...resolveManualBrowserEnvironment(), MRS_PRE_REWARDS_GUARD: preRewards ? '1' : '0' }
+            })
         } catch (error) {
             clearStartup()
             this.sessions.delete(key)

@@ -4,6 +4,7 @@ import { URLSearchParams } from 'url'
 
 import { URLs } from '../../../constants/urls'
 import type { MicrosoftRewardsBot } from '../../../index'
+import { emitRuntimeEvent } from '../../../util/RuntimeEvents'
 import { isAccountReviewUrl, safeAuthorizationLocation } from '../AuthorizationRoute'
 
 export async function appAuthorizationBlockReason(page: Page): Promise<string | null> {
@@ -71,6 +72,8 @@ export class MobileAccessLogin {
             authorizeUrl.searchParams.append('state', randomBytes(16).toString('hex'))
             authorizeUrl.searchParams.append('access_type', 'offline_access')
             authorizeUrl.searchParams.append('login_hint', email)
+            // Reuse the authenticated Microsoft session before asking for interaction.
+            authorizeUrl.searchParams.append('prompt', 'none')
 
             this.bot.logger.debug(
                 this.bot.isMobile,
@@ -85,10 +88,17 @@ export class MobileAccessLogin {
                     'LOGIN-APP',
                     'Request-based OAuth did not return a code, retrying through the active browser context'
                 )
-                code = await this.resolveCodeViaBrowser(authorizeUrl)
+                const browserUrl = new URL(authorizeUrl.href)
+                browserUrl.searchParams.delete('prompt')
+                code = await this.resolveCodeViaBrowser(browserUrl)
             }
 
             if (!code) {
+                if (this.authorizationNeedsReview || this.authorizationActionRequired) {
+                    this.bot.normalSession?.recordScopedOutcome('app-oauth', 'app-needs-action')
+                } else {
+                    this.bot.normalSession?.recordScopedOutcome('app-oauth', 'app-transient')
+                }
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'LOGIN-APP',
@@ -121,6 +131,7 @@ export class MobileAccessLogin {
             if (!token) {
                 const error = response?.data?.error ?? 'unknown_error'
                 const description = response?.data?.error_description ?? 'No access_token in token response'
+                this.bot.normalSession?.recordScopedOutcome('app-oauth', 'app-transient')
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'LOGIN-APP',
@@ -129,9 +140,11 @@ export class MobileAccessLogin {
                 return ''
             }
 
+            emitRuntimeEvent('appAuthorization', { required: false })
             this.bot.logger.info(this.bot.isMobile, 'LOGIN-APP', 'Mobile access token received')
             return token
         } catch (error) {
+            this.bot.normalSession?.recordScopedOutcome('app-oauth', 'app-transient')
             this.bot.logger.error(
                 this.bot.isMobile,
                 'LOGIN-APP',
@@ -185,6 +198,8 @@ export class MobileAccessLogin {
             const blocked = await appAuthorizationBlockReason(oauthPage)
             if (blocked) {
                 this.authorizationActionRequired = true
+                this.bot.normalSession?.recordScopedOutcome('app-oauth', 'app-needs-action')
+                emitRuntimeEvent('appAuthorization', { required: true, reason: blocked })
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'LOGIN-APP',
@@ -211,6 +226,8 @@ export class MobileAccessLogin {
                 const blocked = await appAuthorizationBlockReason(oauthPage)
                 if (blocked) {
                     this.authorizationActionRequired = true
+                    this.bot.normalSession?.recordScopedOutcome('app-oauth', 'app-needs-action')
+                    emitRuntimeEvent('appAuthorization', { required: true, reason: blocked })
                     this.bot.logger.warn(
                         this.bot.isMobile,
                         'LOGIN-APP',
@@ -241,6 +258,8 @@ export class MobileAccessLogin {
         if (!isAccountReviewUrl(rawUrl)) return false
         this.authorizationNeedsReview = true
         this.authorizationActionRequired = true
+        this.bot.normalSession?.recordScopedOutcome('app-oauth', 'app-needs-action')
+        emitRuntimeEvent('appAuthorization', { required: true, reason: 'account-review' })
         this.bot.logger.warn(
             this.bot.isMobile,
             'LOGIN-APP',

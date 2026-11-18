@@ -4,6 +4,7 @@ export interface Account {
     totpSecret?: string
     recoveryEmail: string
     newAccountMode?: boolean
+    newAccountPolicy?: 'standard168h' | 'search72h'
     geoLocale: string
     langCode: string
     proxy: AccountProxy

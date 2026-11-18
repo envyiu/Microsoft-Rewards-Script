@@ -1,6 +1,8 @@
+import { learningQuery } from '../../../util/Learning'
 import { waitForActivity, waitForSearch } from '../../../util/ActivityTiming'
 import type { Page } from 'patchright'
 import { BaseActivity } from '../BaseActivity'
+import { Search } from './BrowserSearch'
 import { activateSearchOnBing, findSearchOnBingOffer, getSearchOnBingQueries } from './SearchOnBingShared'
 import { URLs } from '../../../constants/urls'
 
@@ -83,6 +85,7 @@ export class SearchOnBing extends BaseActivity {
 
                 await this.bot.browser.func.synchronizeActiveBrowserCookies('SEARCH-ON-BING-COOKIE-SEED', true)
                 await this.typeSearch(page, query)
+                await new Search(this.bot).browseResults(page, this.bot.isMobile)
 
                 await waitForSearch(this.bot, this.bot.utils.randomDelay(5000, 7000))
 
@@ -168,16 +171,16 @@ export class SearchOnBing extends BaseActivity {
 
         if (this.bot.executionPlan?.urgent) await page.locator('#sb_form_q').fill(query)
         else await page.keyboard.type(query, { delay: this.bot.utils.randomDelay(45, 90) })
-        const ready = this.bot.executionPlan?.urgent
-            ? page.waitForURL(url => url.searchParams.get('q') === query, {
-                  waitUntil: 'domcontentloaded',
-                  timeout: 15000
-              })
-            : null
-        if (ready) {
-            await Promise.all([ready, page.keyboard.press('Enter')])
-            await page.locator('#b_results').waitFor({ state: 'visible', timeout: 15000 })
-        } else await page.keyboard.press('Enter')
+        if (this.bot.executionPlan?.urgent || this.bot.normalSession?.active) {
+            await learningQuery('activity', this.bot.isMobile, async () => {
+                const ready = page.waitForURL(url => url.searchParams.get('q') === query, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 15000
+                })
+                await Promise.all([ready, page.keyboard.press('Enter')])
+                await page.locator('#b_results').waitFor({ state: 'visible', timeout: 15000 })
+            })
+        } else await learningQuery('activity', this.bot.isMobile, () => page.keyboard.press('Enter'))
         await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {})
     }
 }

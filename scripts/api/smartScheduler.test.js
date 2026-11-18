@@ -15,6 +15,8 @@ import {
     selectRunnableJobs,
     shouldPlanSearch,
     migrateRewardsVerification,
+    earnRecheckDue,
+    applyEarnScan,
     SmartScheduler,
     validateSmartConfig
 } from './smartScheduler.js'
@@ -35,7 +37,13 @@ test('targeted Run now takes the next free slot ahead of recurring work without 
     scheduler.get = () => ({})
     const started = []
     scheduler._start = job => started.push(job.accountIndex)
-    const job = (index, group) => ({ id: String(index), accountIndex: index, networkGroup: group, dueAt: new Date(Date.now() - 10000).toISOString(), urgent: false })
+    const job = (index, group) => ({
+        id: String(index),
+        accountIndex: index,
+        networkGroup: group,
+        dueAt: new Date(Date.now() - 10000).toISOString(),
+        urgent: false
+    })
     const queue = [job(1, 'old'), job(2, 'new')]
     scheduler.queue = [...queue]
     scheduler._drain()
@@ -52,7 +60,9 @@ test('new account planning never emits Rewards work, caps daily queries and pres
     scheduler._drain = () => {}
     const flag = `ACCOUNT_${account.index}_NEW_ACCOUNT_MODE`
     process.env[flag] = 'true'
-    t.after(() => { delete process.env[flag] })
+    t.after(() => {
+        delete process.env[flag]
+    })
     account.newAccountMode = true
     scheduler.replan()
     assert.equal(scheduler.queue.length, 2)
@@ -87,12 +97,33 @@ test('new account checkpoint counts a query once and starts the timer only after
     const scheduler = Object.create(SmartScheduler.prototype)
     scheduler._save = () => {}
     scheduler.document = { state: { accounts: { 1: { day: '2026-10-30', platforms: { desktop: { queries: 0 } } } } } }
-    const record = { job: { id: 'job', accountIndex: 1, day: '2026-10-30', type: 'warmup', platform: 'desktop', services: ['onedrive'], searchBudget: 5 } }
-    const log = (queries, services = []) => ({ message: JSON.stringify({ jobId: 'job', queries, services, at: '2026-10-30T00:00:00Z' }) })
+    const record = {
+        job: {
+            id: 'job',
+            accountIndex: 1,
+            day: '2026-10-30',
+            type: 'warmup',
+            platform: 'desktop',
+            services: ['onedrive'],
+            searchBudget: 5
+        }
+    }
+    const log = (queries, services = []) => ({
+        message: JSON.stringify({ jobId: 'job', queries, services, at: '2026-10-30T00:00:00Z' })
+    })
     scheduler._newAccountCheckpoint(record, log(0, ['onedrive']))
     const state = scheduler.document.state.accounts[1]
     assert.equal(state.newAccount.startedAt, undefined)
-    scheduler._newAccountCheckpoint(record, { message: JSON.stringify({ jobId: 'job', queries: 0, services: ['onedrive'], serviceActions: ['onedrive', 'calendar'], artifacts: ['onedrive', 'todo'], at: '2026-10-30T00:00:00Z' }) })
+    scheduler._newAccountCheckpoint(record, {
+        message: JSON.stringify({
+            jobId: 'job',
+            queries: 0,
+            services: ['onedrive'],
+            serviceActions: ['onedrive', 'calendar'],
+            artifacts: ['onedrive', 'todo'],
+            at: '2026-10-30T00:00:00Z'
+        })
+    })
     assert.deepEqual(state.newAccount.serviceActions, ['onedrive'])
     assert.deepEqual(state.newAccount.artifacts, ['onedrive'])
     scheduler._newAccountCheckpoint(record, log(1))
@@ -105,10 +136,18 @@ test('new account checkpoint counts a query once and starts the timer only after
 })
 
 test('Rewards verification upgrade reopens only the two affected workers once and preserves session/search progress', () => {
-    const state = { accounts: { 1: { workersCompleted: ['dailySet', 'morePromotions', 'punchCards'],
-        workersFailed: ['readToEarn', 'punchCards'], workerFailures: { punchCards: 3, readToEarn: 2 },
-        workerRetryAt: { punchCards: 'old', readToEarn: 'keep' }, platforms: { desktop: { remaining: 7 } } } },
-        sessions: [{ id: 'keep-session' }] }
+    const state = {
+        accounts: {
+            1: {
+                workersCompleted: ['dailySet', 'morePromotions', 'punchCards'],
+                workersFailed: ['readToEarn', 'punchCards'],
+                workerFailures: { punchCards: 3, readToEarn: 2 },
+                workerRetryAt: { punchCards: 'old', readToEarn: 'keep' },
+                platforms: { desktop: { remaining: 7 } }
+            }
+        },
+        sessions: [{ id: 'keep-session' }]
+    }
     assert.equal(migrateRewardsVerification(state), true)
     assert.deepEqual(state.accounts[1].workersCompleted, ['dailySet'])
     assert.deepEqual(state.accounts[1].workersFailed, ['readToEarn'])
@@ -144,6 +183,7 @@ function planningFixture(t, profile = {}, now = '2026-10-13T18:00:00Z') {
         config: validateSmartConfig(
             {
                 enabled: true,
+                normalPolicy: { enabled: false }, // Compatibility coverage; conservative tests below opt in.
                 profiles: [
                     {
                         accountIndex: account.index,
@@ -686,9 +726,7 @@ test('urgent activation bypasses timing gates, restores retries and survives rel
     assert.deepEqual(scheduler.document.config, normal)
     assert.equal(scheduler.get().effectiveEnabled, true)
     assert.equal(scheduler.queue.length, 2)
-    assert.ok(
-        scheduler.queue.every(job => job.urgent && job.searchBudget === 100 && Date.parse(job.dueAt) === Date.now())
-    )
+    assert.ok(scheduler.queue.every(job => job.urgent && job.searchBudget <= 5 && Date.parse(job.dueAt) === Date.now()))
     assert.equal(state.platforms.mobile.queries, 7)
     assert.equal(state.platforms.mobile.failed, false)
     state.platforms.mobile.failures = 2
@@ -715,7 +753,7 @@ test('urgent work ends at local midnight and never applies to the next day', t =
     assert.ok(scheduler.queue.every(job => !job.urgent))
 })
 
-test('urgent selection fills independent network groups up to 32 and keeps manual/account locks', t => {
+test('urgent selection respects configured concurrency and keeps manual/account locks', t => {
     const { scheduler, started } = planningFixture(t)
     scheduler.document.state.urgentRun = { active: true, targets: {}, status: 'active' }
     scheduler.queue = Array.from({ length: 40 }, (_, index) => ({
@@ -728,9 +766,9 @@ test('urgent selection fills independent network groups up to 32 and keeps manua
     scheduler.manualLocks.set(1, 'group-0')
     scheduler.manualLocks.set(2, 'other-group')
     scheduler._drain()
-    assert.equal(started.length, 32)
+    assert.equal(started.length, 2)
     assert.ok(started.every(job => ![1, 2].includes(job.accountIndex)))
-    assert.equal(new Set(started.map(job => job.networkGroup)).size, 32)
+    assert.equal(new Set(started.map(job => job.networkGroup)).size, 2)
 })
 
 test('urgent batching preserves perk dependency, visual isolation and final claim ordering', () => {
@@ -1112,6 +1150,393 @@ test('manual Stop cooldown blocks Urgent and force drain, then resumes at the ne
     assert.ok(started.length > 0)
 })
 
+test('v2 upgrade reopens only Keep earning for an already verified v1 planner', () => {
+    const state = {
+        rewardsVerificationVersion: 1,
+        accounts: {
+            8: {
+                workersCompleted: ['morePromotions', 'punchCards', 'dailySet'],
+                workersFailed: [],
+                workerFailures: { morePromotions: 2 },
+                workerRetryAt: { morePromotions: 'old' },
+                platforms: { desktop: { queries: 7 } }
+            }
+        }
+    }
+    assert.equal(migrateRewardsVerification(state), true)
+    assert.deepEqual(state.accounts[8].workersCompleted, ['punchCards', 'dailySet'])
+    assert.equal(state.accounts[8].platforms.desktop.queries, 7)
+    assert.equal(migrateRewardsVerification(state), false)
+})
+test('Earn rechecks use two-hour cadence and reopen unfinished work without resetting searches', () => {
+    const now = Date.parse('2026-11-02T12:00:00Z')
+    const state = {
+        workersCompleted: ['morePromotions', 'dailySet'],
+        workersFailed: [],
+        workerFailures: {},
+        workerRetryAt: {},
+        platforms: { desktop: { queries: 8 } }
+    }
+    assert.equal(earnRecheckDue(state, now), false)
+    state.earnLastScannedAt = new Date(now - 2 * 60 * 60_000).toISOString()
+    assert.equal(earnRecheckDue(state, now), true)
+    applyEarnScan(state, { verified: false }, now)
+    assert.deepEqual(state.workersCompleted, ['dailySet'])
+    assert.equal(state.platforms.desktop.queries, 8)
+    applyEarnScan(state, { verified: true }, now)
+    assert.equal(earnRecheckDue(state, now + 60 * 60_000), false)
+    assert.equal(earnRecheckDue(state, now + 2 * 60 * 60_000), true)
+})
+test('final Earn check is bounded once per day and respects quiet hours and opt-outs', t => {
+    const { scheduler, account } = planningFixture(
+        t,
+        { allowedWorkers: ['morePromotions'], windows: [], quietHours: [], deadline: '23:00' },
+        '2026-10-13T15:45:00Z'
+    )
+    fs.writeFileSync(
+        path.join(scheduler.projectRoot, 'config.json'),
+        JSON.stringify({ workers: { doMorePromotions: true } })
+    )
+    const state = scheduler._accountState(account, scheduler.document.config.profiles[0], new Date())
+    scheduler.document.config.enabled = false
+    state.workersCompleted = ['morePromotions']
+    state.earnLastScannedAt = '2026-10-13T12:00:00Z'
+    assert.equal(scheduler.replan().queue.filter(j => j.earnFinalCheck).length, 1)
+    state.earnFinalCheckAt = new Date().toISOString()
+    assert.equal(scheduler.replan().queue.filter(j => j.earnFinalCheck).length, 0)
+    delete state.earnFinalCheckAt
+    fs.writeFileSync(
+        path.join(scheduler.projectRoot, 'config.json'),
+        JSON.stringify({ workers: { doMorePromotions: false } })
+    )
+    assert.equal(scheduler.replan().queue.filter(j => j.earnFinalCheck).length, 0)
+    fs.writeFileSync(
+        path.join(scheduler.projectRoot, 'config.json'),
+        JSON.stringify({ workers: { doMorePromotions: true } })
+    )
+    scheduler.document.config.profiles[0].quietHours = [{ start: '22:00', end: '23:59' }]
+    assert.equal(scheduler.replan().queue.filter(j => j.earnFinalCheck).length, 0)
+})
+
+test('search rediscovery reuses its existing job and respects More Promotions profile permission', t => {
+    const { scheduler, account } = planningFixture(t, { allowedWorkers: ['morePromotions'] })
+    scheduler.document.config.enabled = false
+    fs.writeFileSync(
+        path.join(scheduler.projectRoot, 'config.json'),
+        JSON.stringify({ workers: { doMorePromotions: true, doDesktopSearch: true } })
+    )
+    const state = scheduler._accountState(account, scheduler.document.config.profiles[0], new Date())
+    state.workersCompleted = ['morePromotions']
+    state.earnLastScannedAt = new Date(Date.now() - 3 * 60 * 60_000).toISOString()
+    let queue = scheduler.replan().queue
+    assert.equal(queue.filter(j => j.type === 'search' && j.recheckEarn).length, 1)
+    assert.equal(queue.filter(j => j.type === 'workers').length, 0)
+    scheduler.document.config.profiles[0].allowedWorkers = []
+    queue = scheduler.replan().queue
+    assert.equal(queue.filter(j => j.recheckEarn).length, 0)
+})
+for (const success of [true, false])
+    test(`Earn completion requires a successful runtime and Smart worker marker: ${success}`, t => {
+        const { scheduler, account } = planningFixture(t, { allowedWorkers: ['morePromotions'] })
+        scheduler.suspended = true
+        scheduler._drain = () => {}
+        fs.writeFileSync(
+            path.join(scheduler.projectRoot, 'config.json'),
+            JSON.stringify({ workers: { doMorePromotions: true } })
+        )
+        const state = scheduler._accountState(account, scheduler.document.config.profiles[0], new Date())
+        state.workersCompleted = ['morePromotions']
+        scheduler._finish(
+            {
+                job: {
+                    id: 'earn',
+                    day: state.day,
+                    accountIndex: account.index,
+                    type: 'workers',
+                    workers: ['morePromotions']
+                },
+                manager: { getStatus: () => ({ run: { accounts: [{ success }] } }) },
+                workerResults: new Set(success ? ['morePromotions'] : []),
+                earnScan: { verified: true },
+                startedAt: new Date().toISOString()
+            },
+            { code: success ? 0 : 1 }
+        )
+        assert.equal(state.workersCompleted.includes('morePromotions'), success)
+        assert.equal(state.earnScanVerified, success)
+    })
+
+test('warmup stops at reserved daily query cap without claiming unconfirmed queries completed', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    const flag = `ACCOUNT_${account.index}_NEW_ACCOUNT_MODE`
+    process.env[flag] = 'true'
+    t.after(() => {
+        delete process.env[flag]
+    })
+    account.newAccountMode = true
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    state.newAccount.services = ['onedrive', 'todo', 'outlook', 'calendar']
+    state.newAccount.serviceActions = [...state.newAccount.services]
+    state.platforms.mobile.queries = 18
+    state.platforms.desktop.queries = 30
+    state.warmupReservations = { baseline: { mobile: 20, desktop: 30 }, entries: {} }
+    scheduler.replan()
+    assert.equal(scheduler.queue.length, 0)
+    assert.equal(state.platforms.mobile.queries, 18)
+    assert.deepEqual(state.newAccount.queryCapsReached, ['mobile'])
+    state.warmupReservations.baseline.mobile = 19
+    scheduler.replan()
+    assert.equal(scheduler.queue.find(j => j.platform === 'mobile').searchBudget, 1)
+    scheduler.learning = { queryUsage: (_index, _day, platform) => (platform === 'mobile' ? 20 : 30) }
+    scheduler.replan()
+    assert.equal(scheduler.queue.find(j => j.platform === 'mobile').searchBudget, 1)
+    scheduler.learning = null
+    t.mock.timers.tick(24 * 3600000)
+    scheduler.replan()
+    assert.ok(scheduler.queue.some(j => j.platform === 'mobile' && j.searchBudget > 0))
+})
+
+// Conservative sessions: compatibility fixtures above deliberately disable the new policy.
+test('conservative sessions group compatible tasks, never create periodic checks, and keep unknown quota pending', t => {
+    const { scheduler, account } = planningFixture(t, {
+        allowedWorkers: ['dailySet', 'activateSearchPerk', 'morePromotions', 'punchCards', 'readToEarn']
+    })
+    scheduler._drain = () => {}
+    scheduler.document.config.normalPolicy.enabled = true
+    fs.writeFileSync(
+        path.join(scheduler.projectRoot, 'config.json'),
+        JSON.stringify({
+            workers: {
+                doDailySet: true,
+                doActivateSearchPerk: true,
+                doMorePromotions: true,
+                doPunchCards: true,
+                doReadToEarn: true,
+                doMobileSearch: true,
+                doDesktopSearch: true
+            }
+        })
+    )
+    scheduler.replan()
+    assert.equal(scheduler.queue.length, 1)
+    assert.equal(scheduler.queue[0].type, 'accountSession')
+    assert.deepEqual(scheduler.queue[0].workers, ['dailySet', 'activateSearchPerk', 'morePromotions', 'punchCards'])
+    assert.equal(scheduler.queue[0].platform, 'desktop')
+    assert.equal(scheduler.queue[0].searchBudget, 5)
+    const state = scheduler.document.state.accounts[account.index]
+    state.workersCompleted = [...scheduler.document.config.profiles[0].allowedWorkers]
+    state.platforms.desktop.complete = true
+    state.platforms.mobile.complete = true
+    state.earnLastScannedAt = new Date(Date.now() - 3 * 3600000).toISOString()
+    scheduler.replan()
+    assert.deepEqual(scheduler.queue, [])
+    state.platforms.mobile.complete = false
+    state.platforms.mobile.quotaKnown = false
+    scheduler.replan()
+    assert.equal(scheduler.queue[0].platform, 'mobile')
+    assert.equal(state.platforms.mobile.remaining, null)
+})
+
+test('conservative rolling budget and rest survive midnight, retry, Urgent, reload and handoff', async t => {
+    const { scheduler, account } = planningFixture(t, {}, '2026-10-13T16:50:00Z')
+    scheduler._drain = () => {}
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index],
+        now = Date.now()
+    state.protection.sessions = Array.from({ length: 4 }, (_, n) => ({
+        id: String(n),
+        startedAt: new Date(now - (12 - n * 2) * 3600000).toISOString(),
+        endedAt: new Date(now - (11.5 - n * 2) * 3600000).toISOString(),
+        queries: []
+    }))
+    scheduler.replan()
+    assert.equal(scheduler.queue[0].reason, 'SESSION_LIMIT')
+    const dueAt = scheduler.queue[0].dueAt
+    await scheduler.retryAccounts([account.index], { runOnce: true })
+    assert.equal(scheduler.queue[0].reason, 'SESSION_LIMIT')
+    scheduler.setUrgent(true)
+    assert.equal(scheduler.queue[0].dueAt, dueAt)
+    assert.equal(state.protection.sessions.length, 4)
+    scheduler.configFile = path.join(scheduler.projectRoot, 'smart.json')
+    fs.writeFileSync(scheduler.configFile, JSON.stringify(scheduler.document))
+    scheduler.document = scheduler._load()
+    t.mock.timers.tick(20 * 60000)
+    scheduler.replan()
+    const tomorrow = scheduler.document.state.accounts[account.index]
+    assert.notEqual(tomorrow.day, state.day)
+    assert.equal(tomorrow.protection.sessions.length, 4)
+    assert.equal(scheduler.queue[0].reason, 'SESSION_LIMIT')
+    // The handoff planner is transferred unchanged to the destination.
+    const transferred = JSON.parse(JSON.stringify(tomorrow))
+    assert.deepEqual(transferred.protection, tomorrow.protection)
+})
+
+test('account-wide failures hold after two sessions and a failed recovery cannot cycle tasks', async t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.replan()
+    const { recordSessionOutcome, sessionEligibility } = await import('./normalPolicy.js')
+    const state = scheduler.document.state.accounts[account.index],
+        policy = scheduler.document.config.normalPolicy
+    for (let n = 0; n < 2; n++) {
+        state.protection.sessions.push({
+            id: String(n),
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            queries: []
+        })
+        recordSessionOutcome(state, String(n), 'authentication')
+        t.mock.timers.tick(90 * 60000)
+    }
+    assert.equal(sessionEligibility(state, policy).blockedReason, 'ACCOUNT_HOLD')
+    scheduler.setUrgent(true)
+    await scheduler.retryAccounts([account.index], { runOnce: true })
+    assert.equal(sessionEligibility(state, policy).blockedReason, 'ACCOUNT_HOLD')
+    t.mock.timers.tick(24 * 3600000)
+    assert.equal(sessionEligibility(state, policy).recovery, 'recovery-session')
+    assert.equal(sessionEligibility(state, policy).blockedReason, null)
+    state.protection.sessions.push({ id: 'recovery', startedAt: new Date().toISOString(), endedAt: null, queries: [] })
+    assert.equal(sessionEligibility(state, policy).blockedReason, 'SESSION_UNCERTAIN')
+    recordSessionOutcome(state, 'recovery', 'authentication')
+    assert.equal(sessionEligibility(state, policy).blockedReason, 'ACCOUNT_HOLD')
+    state.protection.sessions.push({ id: 'challenge', startedAt: new Date().toISOString(), endedAt: null, queries: [] })
+    recordSessionOutcome(state, 'challenge', 'verification')
+    t.mock.timers.tick(48 * 3600000)
+    assert.equal(sessionEligibility(state, policy).blockedReason, 'VERIFICATION_REQUIRED')
+    assert.throws(() => scheduler.releaseProtection(account.index, {}), { code: 'ACKNOWLEDGEMENT_REQUIRED' })
+    scheduler.releaseProtection(account.index, { acknowledge: true })
+    assert.equal(state.protection.hold, null)
+})
+
+test('conservative process reservation precedes spawn, uncertain query is retained, and forced drain cannot bypass rest', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    scheduler.configFile = path.join(scheduler.projectRoot, 'smart.json')
+    scheduler.command = process.execPath
+    scheduler.args = []
+    scheduler.running = new Map()
+    scheduler.onLog = () => {}
+    scheduler._save = SmartScheduler.prototype._save
+    const original = ProcessManager.prototype.start
+    t.after(() => {
+        ProcessManager.prototype.start = original
+    })
+    ProcessManager.prototype.start = function ({ env }) {
+        const saved = JSON.parse(fs.readFileSync(scheduler.configFile, 'utf8'))
+        assert.equal(saved.state.accounts[account.index].protection.sessions.length, 1)
+        const plan = JSON.parse(env.MRS_EXECUTION_PLAN)
+        assert.equal(plan.type, 'accountSession')
+        assert.ok(plan.searchBudget <= 5)
+        fs.appendFileSync(
+            env.MRS_NORMAL_QUERY_JOURNAL,
+            JSON.stringify({ at: new Date().toISOString(), platform: 'desktop', query: 1 }) + '\n'
+        )
+        this.pid = 123456789
+        return { pid: this.pid }
+    }
+    SmartScheduler.prototype._start.call(scheduler, scheduler.queue[0])
+    const record = [...scheduler.running.values()][0]
+    scheduler._finish(record, { code: 1 })
+    assert.equal(state.protection.sessions.length, 1)
+    assert.equal(state.protection.sessions[0].queries.length, 1)
+    assert.equal(state.workersCompleted.length, 0)
+    assert.equal(state.platforms.desktop.remaining, null)
+    assert.equal(scheduler.queue[0].reason, 'SESSION_REST')
+    const started = []
+    scheduler._start = job => started.push(job)
+    SmartScheduler.prototype._drain.call(scheduler, true)
+    assert.deepEqual(started, [])
+    assert.equal(Date.parse(scheduler.queue[0].dueAt), Date.now() + 90 * 60000)
+})
+
+test('confirmed spawn failure refunds; missing ACK and no pid keep the reservation', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.replan()
+    scheduler.configFile = path.join(scheduler.projectRoot, 'smart.json')
+    scheduler.command = process.execPath
+    scheduler.args = []
+    scheduler.onLog = () => {}
+    const original = ProcessManager.prototype.start
+    t.after(() => {
+        ProcessManager.prototype.start = original
+    })
+    ProcessManager.prototype.start = function () {
+        throw new Error('synchronous spawn failure')
+    }
+    SmartScheduler.prototype._start.call(scheduler, scheduler.queue[0])
+    const state = scheduler.document.state.accounts[account.index]
+    assert.equal(state.protection.sessions[0].refunded, true)
+    state.protection.sessions.push({
+        id: 'unknown-spawn',
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+        queries: []
+    })
+    scheduler.replan()
+    assert.equal(scheduler.queue[0].reason, 'SESSION_UNCERTAIN')
+    scheduler.setUrgent(true)
+    assert.equal(scheduler.queue[0].dueAt, null)
+    assert.throws(() => scheduler.releaseProtection(account.index, { acknowledge: true }), {
+        code: 'SESSION_UNCERTAIN'
+    })
+    scheduler.releaseProtection(account.index, { acknowledge: true, confirmedStopped: true })
+    assert.equal(scheduler.queue[0].reason, 'SESSION_REST')
+    assert.equal(state.protection.sessions.length, 2)
+})
+
+test('normalPolicy accepts 50 sessions and rejects values above configured bounds', () => {
+    assert.equal(validateSmartConfig({ normalPolicy: { maxSessions: 50 } }, accounts).normalPolicy.maxSessions, 50)
+    for (const patch of [
+        { maxSessions: 51 },
+        { restMinutes: 89 },
+        { maxQueries: 6 },
+        { windowHours: 23 },
+        { maxTasks: 5 }
+    ])
+        assert.throws(() => validateSmartConfig({ normalPolicy: patch }, accounts), { code: 'BAD_REQUEST' })
+})
+
+test('corrupt or missing Smart history cannot silently replenish existing normal query journals', t => {
+    const { scheduler } = planningFixture(t)
+    scheduler.configFile = path.join(scheduler.projectRoot, 'smart.json')
+    fs.writeFileSync(scheduler.configFile, '{invalid')
+    assert.throws(() => scheduler._load(), { code: 'SMART_STATE_UNREADABLE' })
+    fs.unlinkSync(scheduler.configFile)
+    fs.mkdirSync(path.join(scheduler.projectRoot, 'normal-query-journal'))
+    fs.writeFileSync(path.join(scheduler.projectRoot, 'normal-query-journal', 'known-session.jsonl'), '{}\n')
+    assert.throws(() => scheduler._load(), { code: 'SMART_STATE_UNREADABLE' })
+})
+
+test('conservative Earn rediscovery shares a useful desktop session and never opens a standalone check', t => {
+    const { scheduler, account } = planningFixture(t, { allowedWorkers: ['morePromotions'] })
+    scheduler._drain = () => {}
+    scheduler.document.config.normalPolicy.enabled = true
+    fs.writeFileSync(
+        path.join(scheduler.projectRoot, 'config.json'),
+        JSON.stringify({ workers: { doMorePromotions: true, doDesktopSearch: true } })
+    )
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    state.workersCompleted = ['morePromotions']
+    state.earnLastScannedAt = new Date(Date.now() - 3 * 3600000).toISOString()
+    scheduler.replan()
+    assert.equal(scheduler.queue.length, 1)
+    assert.equal(scheduler.queue[0].type, 'accountSession')
+    assert.deepEqual(scheduler.queue[0].workers, ['morePromotions'])
+    state.platforms.desktop.complete = true
+    scheduler.replan()
+    assert.equal(scheduler.queue.length, 0)
+})
+
 test('explicit app authorization blocks all shared app tasks while ordinary browser work stays schedulable', t => {
     const { scheduler, account } = planningFixture(t, {
         allowedWorkers: ['dailySet', 'readToEarn', 'dailyCheckIn', 'appPromotions']
@@ -1122,15 +1547,323 @@ test('explicit app authorization blocks all shared app tasks while ordinary brow
     scheduler.suspended = false
     const state = scheduler.document.state.accounts[String(account.index)]
     const day = state.day
-    scheduler._finish({
-        job: { id: 'app-auth', day, accountIndex: account.index, type: 'workers', workers: ['readToEarn'] },
-        manager: { getStatus: () => ({ run: { accounts: [{ success: true }] } }) },
-        workerResults: new Set(), startedAt: new Date().toISOString(),
-        appAuthorization: { required: true, reason: 'email-code-required' }
-    }, { code: 0 })
+    scheduler._finish(
+        {
+            job: { id: 'app-auth', day, accountIndex: account.index, type: 'workers', workers: ['readToEarn'] },
+            manager: { getStatus: () => ({ run: { accounts: [{ success: true }] } }) },
+            workerResults: new Set(),
+            startedAt: new Date().toISOString(),
+            appAuthorization: { required: true, reason: 'email-code-required' }
+        },
+        { code: 0 }
+    )
     assert.equal(state.appAuthorization.reason, 'email-code-required')
     assert.deepEqual(state.workersFailed.sort(), ['appPromotions', 'dailyCheckIn', 'readToEarn'])
     assert.ok(!state.workersCompleted.includes('readToEarn'))
     assert.ok(scheduler.queue.some(job => job.workers?.includes('dailySet')))
-    assert.ok(!scheduler.queue.some(job => job.workers?.some(w => ['readToEarn', 'dailyCheckIn', 'appPromotions'].includes(w))))
+    assert.ok(
+        !scheduler.queue.some(job =>
+            job.workers?.some(w => ['readToEarn', 'dailyCheckIn', 'appPromotions'].includes(w))
+        )
+    )
+})
+
+test('search72h plans only Bing, starts on verified checkpoint and expires exactly after 72 hours across rollover', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    const prefix = `ACCOUNT_${account.index}_`
+    process.env[prefix + 'NEW_ACCOUNT_MODE'] = 'true'
+    process.env[prefix + 'NEW_ACCOUNT_POLICY'] = 'search72h'
+    t.after(() => {
+        delete process.env[prefix + 'NEW_ACCOUNT_MODE']
+        delete process.env[prefix + 'NEW_ACCOUNT_POLICY']
+    })
+    scheduler.replan()
+    assert.equal(scheduler.queue.length, 2)
+    assert.ok(
+        scheduler.queue.every(
+            j =>
+                j.type === 'warmup' &&
+                j.newAccountPolicy === 'search72h' &&
+                j.services.length === 0 &&
+                j.searchBudget <= 5
+        )
+    )
+    const state = scheduler.document.state.accounts[account.index]
+    assert.equal(state.newAccount.startedAt, undefined)
+    const job = scheduler.queue.find(j => j.platform === 'desktop')
+    const record = { job }
+    const checkpoint = queries => ({
+        message: JSON.stringify({ jobId: job.id, queries, services: [], at: new Date().toISOString() })
+    })
+    scheduler._newAccountCheckpoint(record, checkpoint(0))
+    assert.equal(state.newAccount.startedAt, undefined)
+    scheduler._newAccountCheckpoint(record, checkpoint(1))
+    scheduler._newAccountCheckpoint(record, checkpoint(1))
+    assert.equal(state.platforms.desktop.queries, 1)
+    const readyAt = state.newAccount.readyAt
+    assert.equal(Date.parse(readyAt) - Date.parse(state.newAccount.startedAt), 72 * 3600000)
+    t.mock.timers.tick(24 * 3600000)
+    scheduler.replan()
+    const nextDay = scheduler.document.state.accounts[account.index]
+    assert.equal(nextDay.newAccount.readyAt, readyAt)
+    assert.equal(nextDay.newAccount.policy, 'search72h')
+    assert.equal(nextDay.platforms.desktop.queries, 0)
+    assert.ok(scheduler.queue.every(j => j.services.length === 0))
+    nextDay.platforms.desktop.queries = 30
+    nextDay.platforms.mobile.queries = 20
+    scheduler.replan()
+    assert.equal(scheduler.queue.length, 0)
+    t.mock.timers.tick(48 * 3600000 - 1)
+    scheduler.replan()
+    assert.ok(scheduler.queue.every(j => j.type === 'warmup'))
+    t.mock.timers.tick(1)
+    scheduler.replan()
+    assert.ok(scheduler.queue.length > 0)
+    assert.ok(scheduler.queue.every(j => j.type !== 'warmup'))
+})
+
+test('search72h exhausted uncertain reservations cannot be replenished by service-only planning', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    const prefix = `ACCOUNT_${account.index}_`
+    process.env[prefix + 'NEW_ACCOUNT_MODE'] = 'true'
+    process.env[prefix + 'NEW_ACCOUNT_POLICY'] = 'search72h'
+    t.after(() => {
+        delete process.env[prefix + 'NEW_ACCOUNT_MODE']
+        delete process.env[prefix + 'NEW_ACCOUNT_POLICY']
+    })
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    state.warmupReservations = {
+        baseline: { desktop: 0, mobile: 0 },
+        entries: {
+            uncertainDesktop: { platform: 'desktop', budget: 30 },
+            uncertainMobile: { platform: 'mobile', budget: 20 }
+        }
+    }
+    scheduler.replan()
+    assert.deepEqual(state.newAccount.queryCapsReached.sort(), ['desktop', 'mobile'])
+    assert.equal(state.platforms.desktop.queries, 0)
+    assert.equal(state.newAccount.startedAt, undefined)
+    assert.equal(scheduler.queue.length, 0)
+})
+
+test('daily search limits stop normal searches but leave Daily Set schedulable, including Urgent', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.document.config.dailySearchLimits = { mobile: { min: 4, max: 8 }, desktop: { min: 8, max: 10 } }
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    assert.ok(state.dailySearch.targets.mobile >= 4 && state.dailySearch.targets.mobile <= 8)
+    assert.ok(state.dailySearch.targets.desktop >= 8 && state.dailySearch.targets.desktop <= 10)
+    const targets = structuredClone(state.dailySearch.targets)
+    state.dailySearch.baseline = { ...targets }
+    scheduler.replan()
+    assert.deepEqual(state.dailySearch.targets, targets)
+    assert.equal(scheduler.queue.length, 1)
+    assert.ok(scheduler.queue[0].workers.includes('dailySet'))
+    assert.equal(scheduler.queue[0].normalSearchBudget, 0)
+    scheduler.setUrgent(true)
+    assert.equal(scheduler.queue[0].normalSearchBudget, 0)
+    state.workersCompleted = ['dailySet']
+    scheduler.replan()
+    assert.equal(scheduler.queue.length, 0)
+})
+
+test('daily limits apply to warmup without changing services or the eligibility clock', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    const flag = `ACCOUNT_${account.index}_NEW_ACCOUNT_MODE`
+    process.env[flag] = 'true'
+    t.after(() => {
+        delete process.env[flag]
+    })
+    account.newAccountMode = true
+    scheduler.document.config.dailySearchLimits = { mobile: { min: 4, max: 4 }, desktop: { min: 8, max: 8 } }
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    assert.equal(scheduler.queue.find(j => j.platform === 'mobile').searchBudget, 4)
+    assert.equal(scheduler.queue.find(j => j.platform === 'desktop').searchBudget, 5)
+    state.newAccount.startedAt = new Date().toISOString()
+    state.newAccount.readyAt = new Date(Date.now() + 168 * 3600000).toISOString()
+    const readyAt = state.newAccount.readyAt
+    state.dailySearch.baseline = { mobile: 4, desktop: 8 }
+    state.newAccount.services = ['onedrive', 'todo', 'outlook', 'calendar']
+    state.newAccount.serviceActions = [...state.newAccount.services]
+    scheduler.replan()
+    assert.equal(scheduler.queue.length, 0)
+    assert.equal(state.newAccount.readyAt, readyAt)
+})
+
+test('persistent desktop quests cannot starve mobile searches; daily caps and task completion stay separate', t => {
+    const { scheduler, account } = planningFixture(t, { allowedWorkers: ['dailySet', 'morePromotions'] })
+    scheduler._drain = () => {}
+    fs.writeFileSync(
+        path.join(scheduler.projectRoot, 'config.json'),
+        JSON.stringify({
+            workers: { doDailySet: true, doMorePromotions: true, doDesktopSearch: true, doMobileSearch: true }
+        })
+    )
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.document.config.dailySearchLimits = { mobile: { min: 5, max: 15 }, desktop: { min: 10, max: 20 } }
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    state.workersCompleted = ['dailySet']
+    state.platforms.mobile.queries = 1
+    Object.assign(state.platforms.mobile, { quotaKnown: true, remaining: 57 })
+    Object.assign(state.platforms.desktop, { quotaKnown: true, remaining: 30 })
+    state.protection.lastServed = {
+        mobile: new Date(Date.now() - 5 * 3600000).toISOString(),
+        desktop: new Date(Date.now() - 2 * 3600000).toISOString()
+    }
+    scheduler.replan()
+    assert.equal(scheduler.queue[0].platform, 'mobile')
+    assert.equal(scheduler.queue[0].normalSearchBudget, 5)
+    assert.deepEqual(scheduler.queue[0].workers, [])
+    assert.deepEqual(state.workersCompleted, ['dailySet'])
+    assert.ok(state.pendingWorkers.includes('morePromotions'))
+    state.protection.lastServed.mobile = new Date().toISOString()
+    scheduler.replan()
+    assert.equal(scheduler.queue[0].platform, 'desktop')
+    assert.ok(scheduler.queue[0].workers.includes('morePromotions'))
+    state.protection.lastServed.desktop = new Date(Date.now() + 1000).toISOString()
+    state.dailySearch.baseline.mobile = state.dailySearch.targets.mobile
+    scheduler.replan()
+    assert.equal(scheduler.queue[0].platform, 'desktop')
+    assert.ok(scheduler.queue[0].workers.includes('morePromotions'))
+})
+
+test('Daily Set remains first and an unserved mobile quota is not permanently outranked by a known desktop quota', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    Object.assign(state.platforms.desktop, { quotaKnown: true, remaining: 30 })
+    state.protection.lastServed = { desktop: new Date().toISOString() }
+    scheduler.replan()
+    assert.equal(scheduler.queue[0].platform, 'desktop')
+    assert.ok(scheduler.queue[0].workers.includes('dailySet'))
+    state.workersCompleted = ['dailySet']
+    scheduler.replan()
+    assert.equal(scheduler.queue[0].platform, 'mobile')
+    assert.equal(scheduler.queue[0].normalSearchBudget, 5)
+})
+
+test('manual Run next skips rest once without refunding history or leaving a future override', t => {
+    const { scheduler, account, started } = planningFixture(t)
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.document.config.maxParallel = 1
+    scheduler.replan()
+    scheduler.running.clear()
+    started.length = 0
+    const state = scheduler.document.state.accounts[account.index]
+    const endedAt = new Date(Date.now() - 10 * 60000).toISOString()
+    state.protection.sessions = [{ id: 'existing', startedAt: endedAt, endedAt, platform: 'desktop', queries: [] }]
+    scheduler.replan()
+    assert.equal(started.length, 0)
+    scheduler.trigger(null, { force: true })
+    assert.equal(started.length, 1)
+    assert.equal(state.protection.sessions.length, 1)
+    assert.equal(state.protection.sessions[0].endedAt, endedAt)
+    assert.equal(scheduler.runNextRestOverrides.size, 0)
+    scheduler.running.clear()
+    started.length = 0
+    scheduler.replan()
+    assert.equal(started.length, 0)
+})
+
+test('manual Run next cannot bypass account holds, session cap, manual locks or unknown exits', t => {
+    const { scheduler, account, started } = planningFixture(t)
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.replan()
+    scheduler.running.clear()
+    started.length = 0
+    const state = scheduler.document.state.accounts[account.index]
+    const endedAt = new Date(Date.now() - 10 * 60000).toISOString()
+    const session = { id: 'existing', startedAt: endedAt, endedAt, platform: 'desktop', queries: [] }
+    for (const reason of ['hold', 'cap', 'manual', 'uncertain']) {
+        state.protection = { sessions: [{ ...session }] }
+        scheduler.manualLocks.clear()
+        if (reason === 'hold') state.protection.hold = { reason: 'verification', until: null }
+        if (reason === 'cap')
+            state.protection.sessions = Array.from({ length: 4 }, (_, i) => ({ ...session, id: String(i) }))
+        if (reason === 'manual') scheduler.manualLocks.set(account.index, null)
+        if (reason === 'uncertain') state.protection.sessions[0].endedAt = null
+        scheduler.trigger(null, { force: true })
+        assert.equal(started.length, 0, reason)
+        assert.equal(scheduler.runNextRestOverrides.size, 0)
+    }
+})
+
+test('streak search policy recalculates daily and survives rollover for warmup', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    const flag = `ACCOUNT_${account.index}_NEW_ACCOUNT_MODE`
+    process.env[flag] = 'true'
+    t.after(() => {
+        delete process.env[flag]
+    })
+    account.newAccountMode = true
+    scheduler.document.config.streakSearchV1 = true
+    scheduler.replan()
+    let state = scheduler.document.state.accounts[account.index]
+    assert.equal(state.platforms.desktop.dailySearchTarget, 9)
+    assert.equal(state.platforms.mobile.dailySearchTarget, 6)
+    state.searchStreak = { dailyCounter: 10, observedAt: new Date().toISOString() }
+    scheduler.replan()
+    assert.equal(state.platforms.desktop.dailySearchTarget, 15)
+    assert.equal(state.platforms.mobile.dailySearchTarget, 10)
+    state.dailySearch.reservations.test = { platform: 'desktop', budget: 5 }
+    state.searchStreak.dailyCounter = 0
+    scheduler.replan()
+    assert.equal(state.platforms.desktop.dailySearchUsed, 5)
+    assert.equal(state.platforms.desktop.dailySearchTarget, 9)
+    t.mock.timers.tick(24 * 3600000)
+    scheduler.replan()
+    state = scheduler.document.state.accounts[account.index]
+    assert.equal(state.searchStreak.dailyCounter, 0)
+    assert.equal(state.platforms.desktop.dailySearchTarget, 9)
+})
+
+test('warmup service retry exhaustion does not claim authentication is needed after a successful session', t => {
+    const { scheduler, account } = planningFixture(t)
+    scheduler._drain = () => {}
+    const flag = `ACCOUNT_${account.index}_NEW_ACCOUNT_MODE`
+    process.env[flag] = 'true'
+    t.after(() => {
+        delete process.env[flag]
+    })
+    account.newAccountMode = true
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    Object.assign(state.newAccount, {
+        policy: 'standard168h',
+        needsAction: true,
+        serviceAttempts: 3,
+        services: ['onedrive', 'todo', 'outlook', 'calendar'],
+        serviceActions: ['todo', 'outlook', 'calendar']
+    })
+    scheduler.document.state.sessions.push({
+        accountIndex: account.index,
+        type: 'warmup',
+        day: state.day,
+        success: true
+    })
+    scheduler.replan()
+    assert.equal(state.newAccount.needsAction, false)
+    assert.deepEqual(state.newAccount.servicesPending, ['onedrive'])
+    assert.equal(state.newAccount.serviceAttempts, 0)
+    state.newAccount.needsAction = true
+    state.newAccount.serviceAttempts = 3
+    scheduler.document.state.sessions.push({
+        accountIndex: account.index,
+        type: 'warmup',
+        day: state.day,
+        success: false
+    })
+    scheduler.replan()
+    assert.equal(state.newAccount.needsAction, true)
 })

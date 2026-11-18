@@ -1,3 +1,4 @@
+import { learningQuery } from '../../../util/Learning'
 import { randomBytes } from 'crypto'
 
 import { URLs } from '../../../constants/urls'
@@ -32,27 +33,33 @@ export class BingSearchApi {
         }
     }
 
-    public async report(query: string, options?: { cvid?: string; cg?: string }): Promise<BingSearchReport> {
+    public async report(
+        query: string,
+        options?: { cvid?: string; cg?: string; telemetryKind?: 'normal' | 'activity' | 'bonus' | 'visual' }
+    ): Promise<BingSearchReport> {
         const cvid = options?.cvid ?? randomBytes(16).toString('hex')
         const searchUrl = URLs.bing.search(query, cvid)
         const headers = { ...(this.bot.fingerprint?.headers ?? {}) }
         delete headers['Cookie']
         delete headers['cookie']
 
-        const searchResponse = await this.bot.http.request({
-            url: searchUrl,
-            method: 'GET',
-            headers: {
-                ...headers,
-                Cookie: this.cookieHeader(),
-                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Upgrade-Insecure-Requests': '1'
-            }
-        })
+        const searchResponse = await learningQuery(options?.telemetryKind || 'normal', this.bot.isMobile, () =>
+            this.bot.http.request({
+                url: searchUrl,
+                ...(this.bot.normalSession?.active ? { retries: 0 } : {}),
+                method: 'GET',
+                headers: {
+                    ...headers,
+                    Cookie: this.cookieHeader(),
+                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Upgrade-Insecure-Requests': '1'
+                }
+            })
+        )
         this.mergeCookies(searchResponse.headers?.['set-cookie'] as string[] | string | undefined)
 
         const ig = this.readIg(searchResponse.data)

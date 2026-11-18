@@ -280,7 +280,14 @@ async function main() {
 
     const page = await browserIdentity.newIdentityPage(context)
     await page
-        .goto(process.env.MRS_PRE_REWARDS_GUARD === '1' ? 'https://www.bing.com/' : storageState ? REWARDS_URL : `${REWARDS_URL}/auth/login`, { waitUntil: 'domcontentloaded' })
+        .goto(
+            process.env.MRS_PRE_REWARDS_GUARD === '1'
+                ? 'https://www.bing.com/'
+                : storageState
+                  ? REWARDS_URL
+                  : `${REWARDS_URL}/auth/login`,
+            { waitUntil: 'domcontentloaded' }
+        )
         .catch(error => log('WARN', `Initial Rewards navigation did not finish cleanly: ${error.message}`))
 
     log('SUCCESS', storageState ? 'Browser opened with session loaded' : 'Browser opened for manual sign-in')
@@ -294,7 +301,9 @@ async function main() {
     const checkpoint = createSessionCheckpointer(async (reason, { allowUnconfirmed = false } = {}) => {
         try {
             if (!loginConfirmed && process.env.MRS_PRE_REWARDS_GUARD === '1')
-                loginConfirmed = (await context.cookies('https://www.bing.com/')).some(cookie => cookie.name === '_U' && cookie.value)
+                loginConfirmed = (await context.cookies('https://www.bing.com/')).some(
+                    cookie => cookie.name === '_U' && cookie.value
+                )
             if (!loginConfirmed && !allowUnconfirmed) return false
             const current = await captureBrowserSessionState(context, latestState)
             if (!current.cookies.length) {

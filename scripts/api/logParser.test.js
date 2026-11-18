@@ -16,11 +16,25 @@ function apply(state, raw, receivedAt) {
 
 test('structured daily streak observations are independent, monotonic, and keep zero', () => {
     const state = createRunState()
-    const value = { version: 1, email: 'fixture@example.test', dailyCounter: 0, status: 'fresh',
-        source: 'rewards-page', observedAt: '2026-10-27T10:00:00.000Z', partners: [] }
+    const value = {
+        version: 1,
+        email: 'fixture@example.test',
+        dailyCounter: 0,
+        status: 'fresh',
+        source: 'rewards-page',
+        observedAt: '2026-10-27T10:00:00.000Z',
+        partners: []
+    }
     apply(state, line('fixture', 'REWARDS-STREAK', JSON.stringify(value)))
     assert.equal(state.accounts[value.email].rewardsStreak.dailyCounter, 0)
-    apply(state, line('fixture', 'REWARDS-STREAK', JSON.stringify({ ...value, observedAt: '2026-10-26T10:00:00.000Z', dailyCounter: 99 })))
+    apply(
+        state,
+        line(
+            'fixture',
+            'REWARDS-STREAK',
+            JSON.stringify({ ...value, observedAt: '2026-10-26T10:00:00.000Z', dailyCounter: 99 })
+        )
+    )
     assert.equal(state.accounts[value.email].rewardsStreak.dailyCounter, 0)
     apply(state, line('fixture', 'REWARDS-STREAK', JSON.stringify({ ...value, status: 'unknown', dailyCounter: null })))
     assert.equal(state.accounts[value.email].rewardsStreak.status, 'fresh')
@@ -470,8 +484,33 @@ test('marks Edge browsing partial when the local maximum ends before Microsoft r
 
 test('verified completion with unknown offer credit updates balance without inventing earned points', () => {
     const state = createRunState()
-    apply(state, line('fixture', 'ACCOUNT-START', 'Starting account: fixture@example.test | geoLocale: VN | locale: en-US'))
-    apply(state, line('fixture', 'URL-REWARD', 'Completed UrlReward | offerId=test | pointsGained=unknown | currentBalance=105 | completionVerified=true | creditVerified=false'))
+    apply(
+        state,
+        line('fixture', 'ACCOUNT-START', 'Starting account: fixture@example.test | geoLocale: VN | locale: en-US')
+    )
+    apply(
+        state,
+        line(
+            'fixture',
+            'URL-REWARD',
+            'Completed UrlReward | offerId=test | pointsGained=unknown | currentBalance=105 | completionVerified=true | creditVerified=false'
+        )
+    )
     assert.equal(state.accounts['fixture@example.test'].live.balance, 105)
     assert.equal(state.accounts['fixture@example.test'].live.gained, 0)
+})
+
+test('accountSession uses the existing session envelope and retains platform/shared budget', () => {
+    const state = createRunState()
+    apply(
+        state,
+        line(
+            'main',
+            'SMART-SESSION',
+            'Session start | jobId=session-1 | type=accountSession | platform=desktop | budget=5'
+        )
+    )
+    assert.equal(state.smartSession.type, 'accountSession')
+    assert.equal(state.smartSession.platform, 'desktop')
+    assert.equal(state.smartSession.budget, 5)
 })

@@ -28,6 +28,7 @@ function fixture(urgent = false) {
         reportable: true,
         isCompleted: false
     }
+    bot.punchCardsVerified = true // This fixture verifies stage tracking; quest verification has its own suite.
     bot.config = { skipNonPointTasks: true, activities: { urlReward: true } }
     bot.utils = { getFormattedDate: () => 'today' }
     bot.userData = { currentPoints: 435, gainedPoints: 0 }

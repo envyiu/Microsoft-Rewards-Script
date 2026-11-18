@@ -109,3 +109,28 @@ test('manual session reports a startup failure instead of returning an optimisti
         fs.rmSync(projectRoot, { recursive: true, force: true })
     }
 })
+
+test('saved checkpoint is recorded even when the helper subsequently exits by signal', async () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mrs-manual-checkpoint-'))
+    const scriptDir = path.join(projectRoot, 'scripts', 'main')
+    fs.mkdirSync(scriptDir, { recursive: true })
+    fs.writeFileSync(
+        path.join(scriptDir, 'browserSession.js'),
+        "console.log('[SUCCESS] Manual browser ready'); setTimeout(() => { console.log('[SUCCESS] Manual browser checkpoint complete'); setTimeout(() => process.kill(process.pid, 'SIGUSR2'), 30) }, 100); setInterval(() => {}, 1000)"
+    )
+    const manager = new ManualSessionManager({ projectRoot, startupTimeoutMs: 3000 })
+    try {
+        const exited = new Promise(resolve =>
+            manager.on('change', event => {
+                if (event.type === 'exit') resolve(event)
+            })
+        )
+        await manager.open({ accountIndex: 1, email: 'test@example.test', platform: 'desktop' })
+        const event = await exited
+        assert.equal(event.exit.signal, 'SIGUSR2')
+        assert.equal(event.checkpointSaved, true)
+    } finally {
+        await manager.stopAll({ force: true })
+        fs.rmSync(projectRoot, { recursive: true, force: true })
+    }
+})

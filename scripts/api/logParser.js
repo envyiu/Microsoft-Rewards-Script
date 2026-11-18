@@ -355,6 +355,15 @@ function applyEdgeBrowsing(state, entry) {
     return 'edge-browsing'
 }
 
+function parsePipeFields(msg) {
+    const fields = {}
+    for (const part of String(msg || '').split(' | ')) {
+        const eq = part.indexOf('=')
+        if (eq > 0) fields[part.slice(0, eq)] = part.slice(eq + 1)
+    }
+    return fields
+}
+
 export function applyLogToRunState(state, entry) {
     const msg = entry.message ?? ''
 
@@ -450,7 +459,7 @@ export function applyLogToRunState(state, entry) {
 
         case 'SMART-SESSION': {
             const start = msg.match(
-                /^Session start \| jobId=([^|]+) \| type=(search|workers|quota)(?: \| platform=(mobile|desktop) \| budget=(\d+)| \| workers=([^|]+))?$/
+                /^Session start \| jobId=([^|]+) \| type=(search|workers|quota|accountSession|warmup)(?: \| platform=(mobile|desktop) \| budget=(\d+))?(?: \| workers=([^|]+))?$/
             )
             const end = msg.match(/^Session end \| jobId=([^|]+) \| success=(true|false) \| durationSeconds=([\d.]+)$/)
             if (start) {
@@ -479,7 +488,7 @@ export function applyLogToRunState(state, entry) {
         }
 
         case 'SMART-SEARCH-END': {
-            const fields = Object.fromEntries(msg.split(' | ').map(part => part.split('=')))
+            const fields = parsePipeFields(msg)
             if (!['mobile', 'desktop'].includes(fields.platform)) break
             const acc = ensureAccount(state, accountEmailForEntry(state, entry))
             if (!acc) break
@@ -499,8 +508,12 @@ export function applyLogToRunState(state, entry) {
             const observation = rewards.parseRewardsStreak(msg)
             if (!observation) break
             const acc = ensureAccount(state, observation.email)
-            if (acc && (!acc.rewardsStreak || Date.parse(observation.observedAt) > Date.parse(acc.rewardsStreak.observedAt) ||
-                (observation.observedAt === acc.rewardsStreak.observedAt && observation.status === 'fresh')))
+            if (
+                acc &&
+                (!acc.rewardsStreak ||
+                    Date.parse(observation.observedAt) > Date.parse(acc.rewardsStreak.observedAt) ||
+                    (observation.observedAt === acc.rewardsStreak.observedAt && observation.status === 'fresh'))
+            )
                 acc.rewardsStreak = observation
             return 'rewards-streak'
         }
@@ -521,7 +534,7 @@ export function applyLogToRunState(state, entry) {
             break
 
         case 'REWARDS-STATE': {
-            const fields = Object.fromEntries(msg.split(' | ').map(part => part.split('=')))
+            const fields = parsePipeFields(msg)
             const acc = ensureAccount(state, accountEmailForEntry(state, entry))
             if (!acc) break
             acc.reliability = {

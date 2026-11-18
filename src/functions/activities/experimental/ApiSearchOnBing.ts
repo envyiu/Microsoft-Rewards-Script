@@ -80,7 +80,7 @@ export class ApiSearchOnBing extends BaseActivity {
             try {
                 this.bot.logger.debug(this.bot.isMobile, 'SEARCH-ON-BING-SEARCH', `Processing query | query="${query}"`)
 
-                const { ig } = await this.searchApi.report(query, cg ? { cg } : undefined)
+                const { ig } = await this.searchApi.report(query, { ...(cg ? { cg } : {}), telemetryKind: 'activity' })
                 if (!ig) {
                     this.bot.logger.warn(
                         this.bot.isMobile,

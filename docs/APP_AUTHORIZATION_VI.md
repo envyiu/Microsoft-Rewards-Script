@@ -34,3 +34,15 @@ Không chia sẻ URL kết quả có `code`, token hoặc session. Không xóa d
 - Kiểm thử: `scripts/api/appAuthorization.test.js`, nhóm OAuth trong `mobileAuthorization.test.js`; browser UI với `SMART_QA_FOCUS=app-auth`.
 
 Trạng thái source và runtime phải kiểm tra riêng khi triển khai. Không thay toàn bộ scheduler trên máy đang chạy chỉ để áp dụng bản sửa này; giữ chính sách đang vận hành, sao lưu và chỉ vá các điểm tích hợp cần thiết.
+
+## Sửa luồng SSO ngày 13/11/2026
+
+Acc10 được kiểm tra bằng cùng cookie, fingerprint và proxy đã lưu: yêu cầu OAuth
+mặc định dẫn tới Send code, nhưng `prompt=none` cùng `login_hint` nhận được code.
+Bản sửa ưu tiên silent SSO từ session có sẵn; chỉ dùng luồng browser phục hồi khi
+SSO không trả code. Đã xác nhận token thật và GET App dashboard thành công, không
+chạy task hoặc search trong phép kiểm tra này. Không đổi thông báo để giả thành công.
+
+Smart mở lại một lần các task App bị chặn bởi luồng cũ, giữ nguyên task đã hoàn
+thành, search của ngày, số phiên và thời gian nghỉ. Token/marker thật vẫn là điều
+kiện xác nhận cấp quyền/hoàn thành. Một challenge thật sau đó không tạo vòng retry.

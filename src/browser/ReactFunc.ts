@@ -92,6 +92,24 @@ export interface SearchPointsCounters {
     mobile: SearchPointsCounter | null
 }
 
+export interface StreakObservationPayload {
+    version: 1
+    email: string
+    dailyCounter: number | null
+    status: 'fresh' | 'unknown'
+    source: 'rewards-page'
+    observedAt: string
+    partners: Array<{
+        partner: string
+        completedDays: number
+        totalDays: number
+        activitiesCompleted: number
+        activitiesTotal: number
+        isEnabled: boolean
+        isCurrentDayCompleted: boolean
+    }>
+}
+
 export interface PageSnapshot {
     offers: ParsedOffer[]
     dailySet: ParsedOffer[] | null
@@ -99,6 +117,8 @@ export interface PageSnapshot {
     streaks: StreakState[]
     streakProtection: StreakProtectionState | null
     dailyStreak: number | null
+    streakObservation?: StreakObservationPayload | null
+    renderedEarnAvailable?: boolean
     unmatchedEarnCards?: number
     morePromotionsAvailable: boolean
     account: AccountState
@@ -131,38 +151,35 @@ export default class ReactFunc {
         const account = this.parseAccountData(combined)
         const accountEmail = this.bot.currentAccountEmail
 
-        if (accountEmail)
-            this.bot.logger.info(
-                this.bot.isMobile,
-                'REWARDS-STREAK',
-                JSON.stringify({
-                    version: 1,
-                    email: accountEmail,
-                    dailyCounter: dailyStreak,
-                    status: dailyStreak === null ? 'unknown' : 'fresh',
-                    source: 'rewards-page',
-                    observedAt: new Date().toISOString(),
-                    partners: streaks.map(
-                        ({
-                            partner,
-                            completedDays,
-                            totalDays,
-                            activitiesCompleted,
-                            activitiesTotal,
-                            isEnabled,
-                            isCurrentDayCompleted
-                        }) => ({
-                            partner,
-                            completedDays,
-                            totalDays,
-                            activitiesCompleted,
-                            activitiesTotal,
-                            isEnabled,
-                            isCurrentDayCompleted
-                        })
-                    )
-                })
-            )
+        const streakObservation: StreakObservationPayload | null = accountEmail
+            ? {
+                  version: 1,
+                  email: accountEmail,
+                  dailyCounter: dailyStreak,
+                  status: dailyStreak === null ? 'unknown' : 'fresh',
+                  source: 'rewards-page',
+                  observedAt: new Date().toISOString(),
+                  partners: streaks.map(
+                      ({
+                          partner,
+                          completedDays,
+                          totalDays,
+                          activitiesCompleted,
+                          activitiesTotal,
+                          isEnabled,
+                          isCurrentDayCompleted
+                      }) => ({
+                          partner,
+                          completedDays,
+                          totalDays,
+                          activitiesCompleted,
+                          activitiesTotal,
+                          isEnabled,
+                          isCurrentDayCompleted
+                      })
+                  )
+              }
+            : null
 
         this.bot.logger.info(
             this.bot.isMobile,
@@ -177,6 +194,7 @@ export default class ReactFunc {
             streaks,
             streakProtection,
             dailyStreak,
+            streakObservation,
             morePromotionsAvailable: combined.includes('Earn_LevelUpSection') || offers.some(o => !!o.hash),
             account
         }
@@ -601,7 +619,9 @@ export default class ReactFunc {
                 }))
 
             // de-dupe on partner
-            const byPartner = new Map(streaks.filter(s => !s.resetAt || Date.parse(s.resetAt) > Date.now()).map(s => [s.partner, s]))
+            const byPartner = new Map(
+                streaks.filter(s => !s.resetAt || Date.parse(s.resetAt) > Date.now()).map(s => [s.partner, s])
+            )
             const unique = [...byPartner.values()]
 
             this.bot.logger.debug(

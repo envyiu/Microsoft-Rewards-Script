@@ -39,7 +39,8 @@ function fixture() {
         ACCOUNT_2_LANG_CODE: 'en',
         ACCOUNT_2_SAVE_FINGERPRINT_MOBILE: 'false',
         ACCOUNT_2_SAVE_FINGERPRINT_DESKTOP: 'false'
-    })) env[key] = value
+    }))
+        env[key] = value
     return { root, env, envFile }
 }
 
@@ -73,11 +74,26 @@ test('bulk duplicates and invalid proxies fail without writing', () => {
             error => error.code === 'DUPLICATE_ACCOUNT'
         )
         assert.throws(
-            () => addAccounts(root, [{ email: 'another@example.test', proxy: { url: 'socks4://proxy', port: 1, username: 'u', password: 'p' } }], env),
+            () =>
+                addAccounts(
+                    root,
+                    [
+                        {
+                            email: 'another@example.test',
+                            proxy: { url: 'socks4://proxy', port: 1, username: 'u', password: 'p' }
+                        }
+                    ],
+                    env
+                ),
             /SOCKS4 proxy authentication/
         )
         assert.throws(
-            () => addAccounts(root, [{ email: 'another@example.test', langCode: 'en\nACCOUNT_9_EMAIL=injected@example.test' }], env),
+            () =>
+                addAccounts(
+                    root,
+                    [{ email: 'another@example.test', langCode: 'en\nACCOUNT_9_EMAIL=injected@example.test' }],
+                    env
+                ),
             /control characters/
         )
         assert.throws(
@@ -144,6 +160,8 @@ test('delete removes only the selected account block and keeps the remaining acc
         assert.doesNotMatch(raw, /ACCOUNT_1_EMAIL=/)
         assert.match(raw, /ACCOUNT_2_EMAIL=old@example\.test/)
         assert.equal(env.ACCOUNT_1_EMAIL, undefined)
+        assert.equal(env.ACCOUNT_1_NEW_ACCOUNT_POLICY, undefined)
+        assert.doesNotMatch(raw, /ACCOUNT_1_NEW_ACCOUNT_POLICY=/)
         assert.equal(env.ACCOUNT_2_EMAIL, 'old@example.test')
     } finally {
         fs.rmSync(root, { recursive: true, force: true })

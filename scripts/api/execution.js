@@ -48,7 +48,12 @@ export function accountExecutions(accounts, smart, legacy, metadata = () => ({})
                           : null,
                     phase: job?.phase || (legacyActive ? 'working' : null),
                     pid: job?.pid || (legacyActive ? legacy.pid : null),
-                    nextEligibleAt: smart.accounts?.[String(account.index)]?.manualStopUntil || null
+                    nextEligibleAt:
+                        smart.accounts?.[String(account.index)]?.normalPolicyStatus?.nextEligibleAt ||
+                        smart.accounts?.[String(account.index)]?.manualStopUntil ||
+                        null,
+                    blockedReason: smart.accounts?.[String(account.index)]?.normalPolicyStatus?.blockedReason || null,
+                    recovery: smart.accounts?.[String(account.index)]?.normalPolicyStatus?.recovery || null
                 }
             ]
         })

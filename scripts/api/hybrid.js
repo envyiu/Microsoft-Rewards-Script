@@ -1,4 +1,4 @@
-import { WORKER_PROTOCOL, workerCapabilities, ACCOUNT_KEY as accountKey } from '../../packages/contracts/protocol.js'
+import { ACCOUNT_KEY as accountKey } from '../../packages/contracts/protocol.js'
 import path from 'node:path'
 import { runtimeFresh } from './execution.js'
 import fs from 'node:fs'
@@ -6,18 +6,12 @@ import crypto from 'node:crypto'
 import { gzip } from 'node:zlib'
 import { promisify } from 'node:util'
 import { isDeepStrictEqual } from 'node:util'
-import { HybridStore, atomicPrivateJson } from './hybridStore.js'
-import { loadAccounts } from './accounts.js'
-import { deriveNetworkGroup, validateSmartConfig } from './smartScheduler.js'
-import { readConfig, validateConfig } from './configEditor.js'
-import {
-    exportAccountSession,
-    importAccountSession,
-    deleteStoredSessions,
-    validateAccountSession
-} from './sessionStore.js'
-import { AccountIpChecker } from './accountIpChecker.js'
-import { nodeResources } from './nodeResources.js'
+import { HybridStore, atomicPrivateJson } from '../../packages/contracts/store.js'
+import { loadAccounts } from '../../packages/contracts/accounts.js'
+import { deriveNetworkGroup } from './smartScheduler.js'
+import { readConfig } from './configEditor.js'
+import { exportAccountSession, importAccountSession, deleteStoredSessions } from './sessionStore.js'
+import { handleInternalHybridRoutes } from './routes/internal.js'
 
 function fail(message, code = 'HYBRID_UNAVAILABLE', status = 503) {
     throw Object.assign(new Error(message), { code, status })
@@ -74,7 +68,12 @@ export class Hybrid {
         return {
             hardParallel: this.hardParallel,
             accountFilter: account => this.owns(account),
-            manualLocks: new Map(Object.entries(this.holds).map(([index, hold]) => [Number(index), hold.scope === 'account' ? null : hold.group]))
+            manualLocks: new Map(
+                Object.entries(this.holds).map(([index, hold]) => [
+                    Number(index),
+                    hold.scope === 'account' ? null : hold.group
+                ])
+            )
         }
     }
     attach({ scheduler, pm, manual, status, permissions }) {
@@ -118,7 +117,10 @@ export class Hybrid {
         // Pin both to the API's session location, where transferred sessions are stored.
         const botConfig = {
             ...snapshot.botConfig,
-            sessionPath: this.env.MRS_WORKER_MODE === '1' ? path.join(this.env.MRS_WORKER_DATA, 'sessions') : path.resolve(process.cwd(), snapshot.botConfig.sessionPath || 'sessions')
+            sessionPath:
+                this.env.MRS_WORKER_MODE === '1'
+                    ? path.join(this.env.MRS_WORKER_DATA, 'sessions')
+                    : path.resolve(process.cwd(), snapshot.botConfig.sessionPath || 'sessions')
         }
         atomicPrivateJson(this.env.MRS_CONFIG_FILE || path.join(this.root, 'config.json'), botConfig)
     }
@@ -142,14 +144,30 @@ export class Hybrid {
         state.accounts ??= {}
         state.sessions ??= []
         if (body.schedule.enabled === false && state.urgentRun) state.urgentRun.active = false
-        if (state.onceAccounts) state.onceAccounts = state.onceAccounts.filter(index => accounts.some(account => account.index === index))
+        if (state.onceAccounts)
+            state.onceAccounts = state.onceAccounts.filter(index => accounts.some(account => account.index === index))
         for (const hold of body.initialHolds || []) {
-            if (!accounts.some(a => a.index === hold.index) || !/^[a-f0-9-]{36}$/.test(hold.token || '')) fail('Invalid initial hold.', 'BAD_REQUEST', 400)
-            if (hold.scope !== undefined && !['account', 'group'].includes(hold.scope)) fail('Invalid hold scope.', 'BAD_REQUEST', 400)
-            this.holds[hold.index] = { token: hold.token, scope: hold.scope || 'group', group: deriveNetworkGroup(accounts.find(a => a.index === hold.index), body.schedule.networkGroupOverride) }
+            if (!accounts.some(a => a.index === hold.index) || !/^[a-f0-9-]{36}$/.test(hold.token || ''))
+                fail('Invalid initial hold.', 'BAD_REQUEST', 400)
+            if (hold.scope !== undefined && !['account', 'group'].includes(hold.scope))
+                fail('Invalid hold scope.', 'BAD_REQUEST', 400)
+            this.holds[hold.index] = {
+                token: hold.token,
+                scope: hold.scope || 'group',
+                group: deriveNetworkGroup(
+                    accounts.find(a => a.index === hold.index),
+                    body.schedule.networkGroupOverride
+                )
+            }
         }
         this.store.set('holds', this.holds)
-        if (this.scheduler) this.scheduler.manualLocks = new Map(Object.entries(this.holds).map(([index, hold]) => [Number(index), hold.scope === 'account' ? null : hold.group]))
+        if (this.scheduler)
+            this.scheduler.manualLocks = new Map(
+                Object.entries(this.holds).map(([index, hold]) => [
+                    Number(index),
+                    hold.scope === 'account' ? null : hold.group
+                ])
+            )
         this.materialize(body)
         if (body.protocolVersion >= 2) {
             this.store.set('capacity', body.schedule.maxParallel)
@@ -178,6 +196,21 @@ export class Hybrid {
         state.accounts = Object.fromEntries(
             Object.entries(state.accounts).filter(([index]) => accounts.some(a => a.index === Number(index)))
         )
+        for (const item of body.initialStreaks || []) {
+            const account = accounts.find(
+                a => a.index === item.index && a.email.toLowerCase() === String(item.email).toLowerCase()
+            )
+            const stateAccount = account && state.accounts[String(account.index)]
+            if (
+                stateAccount &&
+                Number.isSafeInteger(item.dailyCounter) &&
+                item.dailyCounter >= 0 &&
+                Number.isFinite(Date.parse(item.observedAt)) &&
+                Date.parse(item.observedAt) <= Date.now() + 60000 &&
+                Date.parse(item.observedAt) > (Date.parse(stateAccount.searchStreak?.observedAt || '') || 0)
+            )
+                stateAccount.searchStreak = { dailyCounter: item.dailyCounter, observedAt: item.observedAt }
+        }
         state.sessions = state.sessions.filter(job => accounts.some(a => a.index === job.accountIndex))
         if (state.urgentRun?.targets)
             state.urgentRun.targets = Object.fromEntries(
@@ -186,7 +219,12 @@ export class Hybrid {
                 )
             )
         atomicPrivateJson(configFile, { config: body.schedule, state })
-        this.store.set('snapshot', { ...body, initialSessions: undefined, initialState: undefined, initialHolds: undefined })
+        this.store.set('snapshot', {
+            ...body,
+            initialSessions: undefined,
+            initialState: undefined,
+            initialHolds: undefined
+        })
         this.store.set('revision', body.revision)
         this.store.set('pendingSnapshot', null)
         for (const item of body.initialSessions || [])
@@ -208,10 +246,18 @@ export class Hybrid {
         if (!previous) return false
         const bot = config => ({ ...config, sessionPath: null })
         const settings = schedule => {
-            const value = { ...schedule }; delete value.profiles; delete value.networkGroupOverride; return value
+            const value = { ...schedule }
+            delete value.profiles
+            delete value.networkGroupOverride
+            return value
         }
-        if (!isDeepStrictEqual(bot(previous.botConfig), bot(body.botConfig)) || !isDeepStrictEqual(settings(previous.schedule), settings(body.schedule))) return false
-        const oldAccounts = loadAccounts(previous.accountEnv), nextAccounts = loadAccounts(body.accountEnv)
+        if (
+            !isDeepStrictEqual(bot(previous.botConfig), bot(body.botConfig)) ||
+            !isDeepStrictEqual(settings(previous.schedule), settings(body.schedule))
+        )
+            return false
+        const oldAccounts = loadAccounts(previous.accountEnv),
+            nextAccounts = loadAccounts(body.accountEnv)
         const next = new Set(nextAccounts.map(account => account.index))
         for (const record of this.scheduler.running.values()) if (!next.has(record.job.accountIndex)) return false
         for (const account of oldAccounts) {
@@ -222,8 +268,18 @@ export class Hybrid {
             const prefix = `ACCOUNT_${account.index}_`
             const entries = env => Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith(prefix)))
             if (!isDeepStrictEqual(entries(previous.accountEnv), entries(body.accountEnv))) return false
-            if (!isDeepStrictEqual(previous.schedule.profiles.find(profile => profile.accountIndex === account.index), body.schedule.profiles.find(profile => profile.accountIndex === account.index))) return false
-            if (previous.schedule.networkGroupOverride?.[account.index] !== body.schedule.networkGroupOverride?.[account.index]) return false
+            if (
+                !isDeepStrictEqual(
+                    previous.schedule.profiles.find(profile => profile.accountIndex === account.index),
+                    body.schedule.profiles.find(profile => profile.accountIndex === account.index)
+                )
+            )
+                return false
+            if (
+                previous.schedule.networkGroupOverride?.[account.index] !==
+                body.schedule.networkGroupOverride?.[account.index]
+            )
+                return false
         }
         return true
     }
@@ -333,6 +389,11 @@ export class Hybrid {
             }
             const snapshot = this.snapshot()
             const remote = await this.call('/internal/hybrid/status')
+            if (
+                snapshot.schedule.normalPolicy?.enabled !== false &&
+                remote.capabilities?.conservativeSessionsV1 !== true
+            )
+                fail('VPS requires conservative sessions upgrade.', 'UPGRADE_REQUIRED', 409)
             if (
                 remote.revision !== snapshot.revision ||
                 remote.syncPending ||
@@ -498,7 +559,9 @@ export class Hybrid {
         this.holds[index] = { token, group, scope }
         this.store.set('holds', this.holds)
         this.scheduler.setManualLock(index, scope === 'account' ? null : group)
-        const records = [...this.scheduler.running.values()].filter(record => scope === 'account' ? record.job.accountIndex === index : record.job.networkGroup === group)
+        const records = [...this.scheduler.running.values()].filter(record =>
+            scope === 'account' ? record.job.accountIndex === index : record.job.networkGroup === group
+        )
         if (wait && records.length) fail('Waiting for the current run to finish.', 'WAITING_FOR_RUN', 409)
         for (const record of records) {
             record.handoff = true
@@ -557,189 +620,7 @@ export class Hybrid {
             return true
         }
         try {
-            if (route === '/hybrid/events' && method === 'GET')
-                return reply(200, {
-                    nodeId: this.store.nodeId,
-                    events: this.store.events(Math.max(0, Number(url.searchParams.get('afterId')) || 0))
-                })
-            if (route.startsWith('/internal/hybrid/')) {
-                if (this.role !== 'vps') return reply(404, { error: 'Not found' })
-                const stage = /^\/internal\/hybrid\/stage-session\/([a-f0-9-]{36})$/.exec(route)
-                if (stage && method === 'PUT') {
-                    const body = await read(req)
-                    if (!Number.isSafeInteger(body.index) || body.index < 1 || typeof body.email !== 'string')
-                        fail('Invalid staged session.', 'BAD_REQUEST', 400)
-                    validateAccountSession(body.email, body.bundle)
-                    atomicPrivateJson(path.join(this.store.directory, 'staged', `${stage[1]}.json`), body)
-                    return reply(200, { staged: true })
-                }
-                if (route === '/internal/hybrid/status' && method === 'GET')
-                    return reply(200, {
-                        nodeId: this.store.nodeId,
-                        protocolVersion: this.env.MRS_WORKER_MODE === '1' ? WORKER_PROTOCOL : 2,
-                        capabilities: this.env.MRS_WORKER_MODE === '1' ? workerCapabilities(this.env.MRS_WORKER_KIND, this.env) : undefined,
-                        installation: this.env.MRS_WORKER_MODE === '1' ? { data: this.env.MRS_WORKER_DATA, root: this.env.MRS_WORKER_ROOT || null } : undefined,
-                        manualSessions: this.manual.list(),
-                        manualExits: this.env.MRS_WORKER_MODE === '1' ? this.store.get('manualExits') || {} : undefined,
-                        generation: this.store.get('snapshot')?.generation || 0,
-                        resources: nodeResources(),
-                        revision: this.store.get('revision'),
-                        syncPending: this.scheduler.suspended,
-                        limit: this.hardParallel,
-                        smart: this.scheduler.get(),
-                        accounts: this.pm.getStatus().run.accounts,
-                        points: this.pm.getPoints(),
-                        history: this.pm.getHistory().slice(0, 20),
-                        holds: Object.keys(this.holds).map(Number)
-                    })
-                if (route === '/internal/hybrid/events' && method === 'GET')
-                    return reply(200, {
-                        events: this.store.events(Math.max(0, Number(url.searchParams.get('afterId')) || 0))
-                    })
-                if (route === '/internal/hybrid/probe' && method === 'POST') {
-                    const body = await read(req)
-                    const results = await new AccountIpChecker({ concurrency: 1 }).check(body.accountIndexes ?? null)
-                    return reply(200, {
-                        results: results.map(result => ({ index: result.accountIndex, ok: Boolean(result.ip) }))
-                    })
-                }
-                if (route === '/internal/hybrid/control' && method === 'POST') {
-                    const { route: command, body = {} } = await read(req)
-                    const stopAccount = /^\/smart-schedule\/accounts\/([1-9]\d*)\/stop$/.exec(command)
-                    if (stopAccount) {
-                        const result = await this.scheduler.stopAccount(Number(stopAccount[1]), body.jobId)
-                        return reply(200, { result, smart: this.scheduler.get() })
-                    }
-                    if (command === '/run-once' && this.env.MRS_WORKER_MODE === '1') {
-                        await this.scheduler.retryAccounts(body.accountIndexes, { preempt: false, runOnce: true })
-                    } else if (command === '/capacity') {
-                        if (!Number.isInteger(body.limit) || body.limit < 1 || body.limit > 32)
-                            fail('Capacity must be between 1 and 32.', 'BAD_REQUEST', 400)
-                        this.store.set('capacity', body.limit)
-                        this.scheduler.hardParallel = body.limit
-                        this.scheduler.replan()
-                    } else if (command === '/smart-schedule/urgent') {
-                        if (typeof body.enabled !== 'boolean') fail('enabled must be boolean.', 'BAD_REQUEST', 400)
-                        this.scheduler.setUrgent(body.enabled)
-                    } else if (command === '/smart-schedule/retry')
-                        await this.scheduler.retryAccounts(body.accountIndexes, { preempt: body.preempt })
-                    else if (command === '/smart-schedule/replan') this.scheduler.replan(body)
-                    else if (command === '/stop') {
-                        if (this.env.MRS_WORKER_MODE === '1') {
-                            this.scheduler.suspended = true
-                            this.scheduler.document.state.onceAccounts = []
-                            if (this.scheduler.document.state.urgentRun) this.scheduler.document.state.urgentRun.active = false
-                            this.scheduler._save()
-                        }
-                        await this.scheduler.stop(this.env.MRS_WORKER_MODE === '1' ? { resume: false } : {})
-                    }
-                    else if (['/start', '/restart'].includes(command)) {
-                        if (command === '/restart') await this.scheduler.stop()
-                        this.scheduler.trigger(body.accountIndex == null ? null : [Number(body.accountIndex)], {
-                            force: true
-                        })
-                    } else fail('Unknown node command.', 'BAD_REQUEST', 400)
-                    return reply(202, { applied: true, smart: this.scheduler.get() })
-                }
-                if (route === '/internal/hybrid/snapshot' && method === 'PUT') {
-                    if (this.applying) fail('Configuration activation in progress.', 'SYNC_PENDING', 409)
-                    this.applying = true
-                    try {
-                        const body = await read(req)
-                        if (this.env.MRS_WORKER_MODE === '1' && body.protocolVersion !== WORKER_PROTOCOL) fail('Worker protocol mismatch.', 'UPGRADE_REQUIRED', 409)
-                        if (
-                            !/^[a-f0-9]{64}$/.test(body.revision || '') ||
-                            !body.accountEnv ||
-                            Object.entries(body.accountEnv).some(
-                                ([key, value]) => !accountKey.test(key) || typeof value !== 'string'
-                            )
-                        )
-                            fail('Invalid node snapshot.', 'BAD_REQUEST', 400)
-                        if (this.env.MRS_WORKER_MODE === '1') {
-                            const accepted = this.store.get('pendingSnapshot') || this.store.get('snapshot')
-                            if (!Number.isSafeInteger(body.generation) || body.generation < 1 || !/^[a-f0-9-]{36}$/.test(body.authority || '')) fail('Invalid snapshot authority.', 'BAD_REQUEST', 400)
-                            if (accepted && (accepted.authority !== body.authority || accepted.generation > body.generation || (accepted.generation === body.generation && accepted.revision !== body.revision))) fail('Stale snapshot.', 'STALE_SNAPSHOT', 409)
-                        }
-                        if (body.revision === this.store.get('revision')) {
-                            const accepted = this.store.get('snapshot')
-                            this.store.set('pendingSnapshot', null)
-                            this.scheduler.suspended = false
-                            if (accepted && this.scheduler.document.config.enabled !== accepted.schedule.enabled)
-                                this.scheduler.update({
-                                    ...this.scheduler.document.config,
-                                    enabled: accepted.schedule.enabled
-                                })
-                            else this.scheduler._arm()
-                            return reply(200, { applied: true })
-                        }
-                        const accounts = loadAccounts(body.accountEnv)
-                        if (accounts.some(account => !account.proxy) && !(this.env.MRS_WORKER_MODE === '1' && this.env.MRS_WORKER_KIND === 'local'))
-                            fail('VPS accepts proxied accounts only.', 'BAD_REQUEST', 400)
-                        const validation = await validateConfig(body.botConfig, { projectRoot: this.root })
-                        if (!validation.ok) fail('Invalid bot configuration.', 'BAD_REQUEST', 400)
-                        const schedule = validateSmartConfig(body.schedule, accounts)
-                        const previous = this.store.get('snapshot')
-                        if (
-                            !Number.isSafeInteger(body.generation) ||
-                            body.generation < 1 ||
-                            !/^[a-f0-9-]{36}$/.test(body.authority || '')
-                        )
-                            fail('Missing snapshot generation.', 'BAD_REQUEST', 400)
-                        if (
-                            previous &&
-                            (previous.authority !== body.authority ||
-                                previous.generation > body.generation ||
-                                (previous.generation === body.generation && previous.revision !== body.revision))
-                        )
-                            fail('A newer configuration has already been accepted.', 'STALE_SNAPSHOT', 409)
-                        for (const account of loadAccounts(previous?.accountEnv || {})) {
-                            if (!accounts.some(a => a.index === account.index) && !this.holds[account.index])
-                                fail('Account removal requires a handoff hold.', 'ACCOUNT_HELD', 409)
-                        }
-                        // Keep validated configuration durable while jobs drain. Otherwise a restart
-                        // resumes the old schedule before the coordinator can retry activation.
-                        body.schedule = schedule
-                        this.store.set('pendingSnapshot', body)
-                        if (this.scheduler.running.size && !this.canApplyMembershipSnapshot(body)) {
-                            this.scheduler.suspended = true
-                            fail('Waiting for running jobs before applying configuration.', 'SYNC_PENDING', 409)
-                        }
-                        this.scheduler.suspended = true
-                        this.activateSnapshot(body)
-                        return reply(200, { applied: true })
-                    } finally {
-                        this.applying = false
-                    }
-                }
-                const match = /^\/internal\/hybrid\/accounts\/(\d+)\/(hold|release|delete-session)$/.exec(route)
-                if (match && method === 'POST') {
-                    const index = Number(match[1])
-                    const body = await read(req)
-                    if (!/^[a-f0-9-]{36}$/.test(body.token || '')) fail('Invalid hold token.', 'BAD_REQUEST', 400)
-                    const released = this.store.get('released') || {}
-                    if (!this.holds[index] && released[index] === body.token) {
-                        if (match[2] === 'hold') fail('Handoff already completed.', 'STALE_HANDOFF', 409)
-                        return reply(200, { released: true })
-                    }
-                    if (match[2] === 'hold')
-                        return reply(200, await this.hold(index, body.token, { wait: Boolean(body.wait), scope: body.scope || 'group' }))
-                    if (this.holds[index]?.token !== body.token) fail('Hold token does not match.', 'ACCOUNT_HELD', 409)
-                    const account = loadAccounts(this.env).find(a => a.index === index)
-                    if (match[2] === 'delete-session')
-                        deleteStoredSessions(this.root, this.sessionPath(), account.email)
-                    else if (body.bundle) {
-                        if (!account) fail('Account was removed.', 'ACCOUNT_NOT_FOUND', 404)
-                        importAccountSession(this.root, this.sessionPath(), account.email, body.bundle)
-                    }
-                    delete this.holds[index]
-                    this.store.set('holds', this.holds)
-                    released[index] = body.token
-                    this.store.set('released', released)
-                    this.scheduler.clearManualLock(index)
-                    return reply(200, { released: true })
-                }
-                return reply(404, { error: 'Not found' })
-            }
+            if (await handleInternalHybridRoutes(this, req, res, url, { read, reply })) return true
             if (this.role === 'vps') {
                 if (method !== 'GET' && method !== 'OPTIONS')
                     return reply(403, { error: 'Use the home coordinator to manage this node.' })
@@ -935,10 +816,9 @@ export class Hybrid {
                 } else if (route.endsWith('/replan')) this.scheduler.replan(body)
                 else if (route === '/stop') await this.scheduler.stop()
                 else {
-                    if (route === '/restart') await this.scheduler.stop()
-                    this.scheduler.trigger(body.accountIndex == null ? null : [Number(body.accountIndex)], {
-                        force: true
-                    })
+                    if (!selected || !this.remoteOwned(selected)) {
+                        await this.scheduler.executeStartCommand({ route, body, strict: false })
+                    }
                 }
                 return reply(202, { ...forward, smart: true, ...this.decorateSmart(this.scheduler.get()) })
             }
@@ -951,7 +831,8 @@ export class Hybrid {
         } catch (error) {
             return reply(error.status || 500, {
                 error: error.code ? error.message : 'Hybrid operation failed.',
-                code: error.code || 'HYBRID_ERROR'
+                code: error.code || 'HYBRID_ERROR',
+                ...(error.nextEligibleAt !== undefined ? { nextEligibleAt: error.nextEligibleAt } : {})
             })
         }
     }

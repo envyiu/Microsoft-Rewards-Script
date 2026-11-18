@@ -340,7 +340,14 @@ for (const promotional of [true, false]) {
         const errors = [],
             calls = []
         const offerId = 'WW_Rewards_Campaign_Global_EU_Expansion_BingOffer1'
-        const offer = { offerId, hash: 'synthetic-trip-hash', points: 5, pointProgress: 0, reportable: true, isPromotional: promotional }
+        const offer = {
+            offerId,
+            hash: 'synthetic-trip-hash',
+            points: 5,
+            pointProgress: 0,
+            reportable: true,
+            isPromotional: promotional
+        }
         const bot = {
             isMobile: true,
             logger: { ...logger, error: (_platform, _title, message) => errors.push(message) },
@@ -368,7 +375,10 @@ for (const promotional of [true, false]) {
             browser: { react: { availablePointsFromPayload: () => 445 } }
         }
         bot.browser.func = new BrowserFunc(bot)
-        bot.browser.func.refreshEarnSnapshot = async () => ({ offers: [{ ...offer, pointProgress: 5, isCompleted: true }], account: { availablePoints: 445 } })
+        bot.browser.func.refreshEarnSnapshot = async () => ({
+            offers: [{ ...offer, pointProgress: 5, isCompleted: true }],
+            account: { availablePoints: 445 }
+        })
         await new UrlReward(bot).doUrlReward({ offerId })
         assert.equal(calls.length, 1)
         assert.deepEqual(calls[0], [

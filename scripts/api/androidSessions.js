@@ -17,7 +17,9 @@ function socketPath() {
 }
 
 export function normalizeAccountEmail(value) {
-    return String(value ?? '').trim().toLowerCase()
+    return String(value ?? '')
+        .trim()
+        .toLowerCase()
 }
 
 export function accountRefForEmail(email) {
@@ -68,9 +70,11 @@ function callBridge(action, data = {}) {
             finish(error)
         })
         socket.on('error', error => {
-            const wrapped = new Error(error.code === 'ENOENT' || error.code === 'ECONNREFUSED'
-                ? 'Host bridge is not running.'
-                : 'Host bridge connection failed.')
+            const wrapped = new Error(
+                error.code === 'ENOENT' || error.code === 'ECONNREFUSED'
+                    ? 'Host bridge is not running.'
+                    : 'Host bridge connection failed.'
+            )
             wrapped.code = 'BRIDGE_UNAVAILABLE'
             finish(wrapped)
         })
@@ -87,7 +91,9 @@ function callBridge(action, data = {}) {
                 return finish(error)
             }
             if (!payload?.ok) {
-                const error = new Error(typeof payload?.error === 'string' ? payload.error : 'Host bridge request failed.')
+                const error = new Error(
+                    typeof payload?.error === 'string' ? payload.error : 'Host bridge request failed.'
+                )
                 error.code = payload?.code || 'BRIDGE_ERROR'
                 return finish(error)
             }
@@ -117,7 +123,10 @@ export async function openAndroidSession({ accountIndex, email }) {
         accountRef: accountRefForEmail(email),
         accountIndex,
         proxy,
-        httpProxy: proxy && envBool(`ACCOUNT_${accountIndex}_PROXY_HTTP`, false) && ['http:', 'https:'].includes(scheme) ? proxy : null
+        httpProxy:
+            proxy && envBool(`ACCOUNT_${accountIndex}_PROXY_HTTP`, false) && ['http:', 'https:'].includes(scheme)
+                ? proxy
+                : null
     })
 }
 

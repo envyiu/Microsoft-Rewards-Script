@@ -33,7 +33,13 @@ test('runtime account validation accepts authenticated SOCKS5 credentials', () =
 
 test('runtime account validation keeps partial credentials and authenticated SOCKS4 invalid', () => {
     const partial = AccountSchema.safeParse(
-        account({ proxyHttp: false, url: 'socks5://proxy.example.test', port: 1080, username: 'proxy-user', password: '' })
+        account({
+            proxyHttp: false,
+            url: 'socks5://proxy.example.test',
+            port: 1080,
+            username: 'proxy-user',
+            password: ''
+        })
     )
     const socks4 = AccountSchema.safeParse(
         account({

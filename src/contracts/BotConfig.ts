@@ -98,14 +98,15 @@ const WebhookSchema = z.object({
     webhookLogFilter: LogFilterSchema
 })
 
-export const ConfigSchema = z.object({
+export const ConfigObjectSchema = z.object({
     sessionPath: z.string(),
     headless: z.boolean(),
     clusters: z.number().int().nonnegative(),
     errorDiagnostics: z.boolean(),
     ensureStreakProtection: z.boolean(),
     autoClaimPunchcardRewards: z.boolean(),
-    contintueOnBotWarning: z.boolean().default(false),
+    contintueOnBotWarning: z.boolean().optional(),
+    continueOnBotWarning: z.boolean().optional(),
     skipNonPointTasks: z.boolean().default(true),
     accountDelay: DelaySchema.default({ min: '1min', max: '3min' }),
     workers: z.object({
@@ -158,6 +159,11 @@ export const ConfigSchema = z.object({
     consoleLogFilter: LogFilterSchema,
     webhook: WebhookSchema
 })
+
+export const ConfigSchema = ConfigObjectSchema.transform(({ continueOnBotWarning, ...cfg }) => ({
+    ...cfg,
+    contintueOnBotWarning: cfg.contintueOnBotWarning ?? continueOnBotWarning ?? false
+}))
 
 const AccountProxySchema = z
     .object({
@@ -230,6 +236,7 @@ const AccountProxySchema = z
 
 export const AccountSchema = z.object({
     newAccountMode: z.boolean().optional(),
+    newAccountPolicy: z.enum(['standard168h', 'search72h']).optional(),
     email: z.string(),
     password: z.string(),
     totpSecret: z.string().optional(),

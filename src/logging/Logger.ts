@@ -1,3 +1,4 @@
+import { learningPhase } from '../util/Learning'
 import chalk from 'chalk'
 import cluster from 'cluster'
 import { sendDiscord } from './Discord'
@@ -86,6 +87,7 @@ export class Logger {
         message: string | Error,
         color?: ColorKey
     ): void {
+        learningPhase(title, platformText(isMobile).toLowerCase())
         if (level === 'error') this.markWorkerFailure()
         const config = this.bot.config
         if (level === 'debug' && !config.debugLogs && !process.argv.includes('-dev')) return

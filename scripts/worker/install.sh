@@ -52,7 +52,7 @@ if [ -z "$WORKER_NODE" ] || ! "$WORKER_NODE" -e 'process.exit(+process.versions.
         curl -fsSLO https://nodejs.org/dist/v24.22.1/SHASUMS256.txt
         rg_line=' node-v24.22.1-linux-x64.tar.xz$'
         grep "$rg_line" SHASUMS256.txt | sha256sum -c -
-        sudo -n mkdir -p /opt/msrw-node
+        sudo -n install -d -m 0755 /opt/msrw-node
         sudo -n tar -xJf node-v24.22.1-linux-x64.tar.xz --strip-components=1 -C /opt/msrw-node
     )
     rm -rf "$NODE_TEMP"
@@ -168,6 +168,7 @@ const data=process.env.WORKER_DATA,root=process.env.WORKER_ROOT;
 fs.writeFileSync(path.join(data,'legacy-install.json'),JSON.stringify({root,data,release:fs.realpathSync(path.join(root,'current')),service:'msrw-vps.service'}),{mode:0o600});
 JSLEGACY
 fi
+"$WORKER_NODE" "$WORKER_RELEASE/scripts/worker/setupUpdater.js" --root "$WORKER_ROOT" --data "$WORKER_DATA" --kind "$WORKER_KIND"
 ln -sfn "$WORKER_RELEASE" "$WORKER_ROOT/current"
 if [ "$WORKER_KIND" = local ]; then
     systemctl --user daemon-reload

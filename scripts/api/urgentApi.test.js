@@ -34,7 +34,11 @@ async function fixture(t, writable = true) {
     await new Promise(resolve => socket.close(resolve))
     fs.writeFileSync(
         path.join(dir, 'smart.json'),
-        JSON.stringify({ enabled: false, profiles: [{ accountIndex: 900001, allowedWorkers: [] }] })
+        JSON.stringify({
+            enabled: false,
+            normalPolicy: { enabled: false },
+            profiles: [{ accountIndex: 900001, allowedWorkers: [] }]
+        })
     )
     fs.writeFileSync(path.join(dir, 'schedule.json'), JSON.stringify({ enabled: false }))
     fs.writeFileSync(path.join(dir, 'child.cjs'), 'setTimeout(() => {}, 3000)')
@@ -114,7 +118,7 @@ test('urgent API authenticates, validates, excludes legacy runs and returns to p
     assert.equal(started.data.config.enabled, false)
     assert.equal(started.data.urgent.active, true)
     assert.equal(started.data.effectiveEnabled, true)
-    assert.ok([...started.data.queue, ...started.data.running].every(job => job.urgent && job.searchBudget === 100))
+    assert.ok([...started.data.queue, ...started.data.running].every(job => job.urgent && job.searchBudget <= 5))
     const cancelled = await request('/smart-schedule/urgent', { enabled: false })
     assert.equal(cancelled.data.urgent.status, 'cancelled')
     assert.equal(cancelled.data.effectiveEnabled, false)

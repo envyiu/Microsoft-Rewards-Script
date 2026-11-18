@@ -1,3 +1,5 @@
+import { clickEarnCards } from './RenderedEarnActions'
+import { emitRuntimeEvent } from '../../../util/RuntimeEvents'
 import { BaseActivity } from '../BaseActivity'
 import type { BasePromotion, DashboardData } from '../../../interface/DashboardData'
 import { PromotionActivityRunner } from './PromotionActivityRunner'
@@ -6,6 +8,23 @@ import type { ParsedOffer } from '../../../browser/ReactFunc'
 export class MorePromotions extends BaseActivity {
     public async run(data: DashboardData): Promise<void> {
         this.bot.morePromotionsVerified = false
+        try {
+            await this.process(data)
+        } finally {
+            const observedAt = new Date().toISOString()
+            emitRuntimeEvent('earnScan', { verified: this.bot.morePromotionsVerified, observedAt })
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'EARN-SCAN-END',
+                `verified=${this.bot.morePromotionsVerified} | observedAt=${observedAt}`
+            )
+        }
+    }
+
+    private async process(data: DashboardData): Promise<void> {
+        this.bot.morePromotionsVerified = false
+        let clicked =
+            typeof this.bot.browser.func.withRewardsPage === 'function' ? await clickEarnCards(this.bot) : null
         // The legacy dashboard and Bing flyout can omit cards rendered on /earn.
         const snapshot = await this.bot.browser.func.refreshEarnSnapshot({ rendered: true })
         if (snapshot) this.bot.reactSnapshot = snapshot
@@ -78,7 +97,12 @@ export class MorePromotions extends BaseActivity {
                 promotion.promotionType = 'urlreward'
             }
         }
-        const pending = [...promotions.values()].filter(promotion => this.isActionable(promotion))
+        const pending = [...promotions.values()].filter(
+            promotion =>
+                this.isActionable(promotion) &&
+                !clicked?.attemptedOfferIds.has(promotion.offerId) &&
+                !liveOffers.some(offer => offer.offerId === promotion.offerId && (offer.isCompleted || offer.isLocked))
+        )
         const belongsHere = (offer: ParsedOffer) =>
             !excluded.has(offer.offerId) && !/pcchild|pcparent/i.test(offer.offerId)
         const needsWork = (offer: ParsedOffer) =>
@@ -106,7 +130,12 @@ export class MorePromotions extends BaseActivity {
         }
         if (!pending.length) {
             this.bot.morePromotionsVerified =
-                snapshot !== null && snapshot.morePromotionsAvailable !== false && !snapshot.unmatchedEarnCards && !liveOffers.some(needsWork)
+                snapshot !== null &&
+                snapshot.renderedEarnAvailable !== false &&
+                clicked?.complete !== false &&
+                snapshot.morePromotionsAvailable !== false &&
+                !snapshot.unmatchedEarnCards &&
+                !liveOffers.some(needsWork)
             this.bot.logger.info(this.bot.isMobile, 'MORE-PROMOTIONS', 'No actionable "More Promotions" items found')
             return
         }
@@ -122,7 +151,11 @@ export class MorePromotions extends BaseActivity {
         // Newly unlocked cards were not in the original pending list. Give one
         // extra wave a chance, then leave further progress to the next job.
         const newlyAvailable = (verified?.offers ?? []).filter(
-            offer => needsWork(offer) && offer.reportable && !pending.some(p => p.offerId === offer.offerId)
+            offer =>
+                needsWork(offer) &&
+                offer.reportable &&
+                !pending.some(p => p.offerId === offer.offerId) &&
+                !clicked?.attemptedOfferIds.has(offer.offerId)
         )
         if (newlyAvailable.length) {
             const extra = newlyAvailable.map(
@@ -179,8 +212,15 @@ export class MorePromotions extends BaseActivity {
                 `Card status | offerId=${offer.offerId} | title=${JSON.stringify(offer.title)} | reason=${reason}`
             )
         }
+        if (clicked) {
+            clicked = await clickEarnCards(this.bot, clicked)
+            verified = await this.bot.browser.func.refreshEarnSnapshot({ rendered: true })
+            if (verified) this.bot.reactSnapshot = verified
+        }
         this.bot.morePromotionsVerified =
             verified !== null &&
+            verified.renderedEarnAvailable !== false &&
+            clicked?.complete !== false &&
             verified.morePromotionsAvailable !== false &&
             !verified.unmatchedEarnCards &&
             remaining.length === 0 &&

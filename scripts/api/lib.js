@@ -104,8 +104,14 @@ export function parseEnvValue(raw) {
 
 export function loadConfigSafe(projectRoot) {
     if (process.env.MRS_CONFIG_FILE) {
-        try { return { path: process.env.MRS_CONFIG_FILE, data: JSON.parse(fs.readFileSync(process.env.MRS_CONFIG_FILE, 'utf8')) } }
-        catch (error) { return { path: process.env.MRS_CONFIG_FILE, data: null, error: error.message } }
+        try {
+            return {
+                path: process.env.MRS_CONFIG_FILE,
+                data: JSON.parse(fs.readFileSync(process.env.MRS_CONFIG_FILE, 'utf8'))
+            }
+        } catch (error) {
+            return { path: process.env.MRS_CONFIG_FILE, data: null, error: error.message }
+        }
     }
     const candidates = [
         path.join(projectRoot, 'config.json'),

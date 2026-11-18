@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { BOT_CONFIG_METADATA } from '../../packages/contracts/configMetadata.js'
 
 function resolveConfigPath(projectRoot) {
     if (process.env.MRS_CONFIG_FILE) return path.resolve(process.env.MRS_CONFIG_FILE)
@@ -26,11 +27,17 @@ async function loadConfigSync(projectRoot, override) {
 }
 
 async function loadBotValidator(projectRoot, override) {
-    const modPath = override || path.join(projectRoot, 'dist', 'util', 'Validator.js')
-    if (!override && !fs.existsSync(modPath)) return null
+    const candidates = override
+        ? [override]
+        : [
+              path.join(projectRoot, 'dist', 'util', 'Validator.js'),
+              path.join(projectRoot, 'packages', 'contracts', 'dist', 'contracts', 'BotConfig.js')
+          ]
+    const modPath = override || candidates.find(candidate => fs.existsSync(candidate))
+    if (!modPath) return null
     try {
         const mod = await import(pathToFileURL(path.resolve(modPath)).href)
-        const m = mod.default && !mod.validateConfig ? mod.default : mod
+        const m = mod.default && !mod.validateConfig && !mod.ConfigSchema ? mod.default : mod
         if (m.ConfigSchema && typeof m.ConfigSchema.parse === 'function') {
             return { via: 'bot-ConfigSchema', run: cfg => m.ConfigSchema.parse(cfg) }
         }
@@ -45,151 +52,20 @@ async function loadBotValidator(projectRoot, override) {
     }
 }
 
-const BOOL_KEYS = [
-    'headless',
-    'errorDiagnostics',
-    'ensureStreakProtection',
-    'autoClaimPunchcardRewards',
-    'skipNonPointTasks',
-    'searchOnBingLocalQueries',
-    'debugLogs'
-]
-
-function isObject(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function validateBooleanObject(value, path, errors) {
-    if (!isObject(value)) {
-        errors.push(`${path} must be an object`)
-        return
-    }
-    for (const [key, item] of Object.entries(value)) {
-        if (typeof item !== 'boolean') errors.push(`${path}.${key} must be a boolean`)
-    }
-}
-
-function validateNumberOrString(value, path, errors) {
-    if (typeof value !== 'number' && typeof value !== 'string') {
-        errors.push(`${path} must be a number or string`)
-    }
-}
-
-function validateDelay(value, path, errors) {
-    if (!isObject(value)) {
-        errors.push(`${path} must be an object`)
-        return
-    }
-    if ('min' in value) validateNumberOrString(value.min, `${path}.min`, errors)
-    if ('max' in value) validateNumberOrString(value.max, `${path}.max`, errors)
-}
-
-function validateLogFilter(value, path, errors) {
-    if (!isObject(value)) {
-        errors.push(`${path} must be an object`)
-        return
-    }
-    if ('enabled' in value && typeof value.enabled !== 'boolean') errors.push(`${path}.enabled must be a boolean`)
-    if ('mode' in value && !['whitelist', 'blacklist'].includes(value.mode)) {
-        errors.push(`${path}.mode must be "whitelist" or "blacklist"`)
-    }
-    for (const key of ['levels', 'keywords', 'regexPatterns']) {
-        if (key in value && (!Array.isArray(value[key]) || value[key].some(item => typeof item !== 'string'))) {
-            errors.push(`${path}.${key} must be an array of strings`)
+function normalizeAliases(cfg) {
+    if (typeof cfg !== 'object' || cfg === null || Array.isArray(cfg)) return cfg
+    const out = { ...cfg }
+    for (const [alias, canonical] of Object.entries(BOT_CONFIG_METADATA.backwardCompatibleAliases || {})) {
+        if (alias in out) {
+            if (!(canonical in out)) out[canonical] = out[alias]
+            delete out[alias]
         }
     }
-}
-
-function structuralValidate(cfg) {
-    const errors = []
-    if (!isObject(cfg)) {
-        return { ok: false, errors: ['config must be a JSON object'] }
-    }
-    if (typeof cfg.sessionPath !== 'string') errors.push('sessionPath must be a string')
-    if (!Number.isInteger(cfg.clusters) || cfg.clusters < 0) errors.push('clusters must be a non-negative integer')
-    for (const k of BOOL_KEYS) {
-        if (k in cfg && typeof cfg[k] !== 'boolean') errors.push(`${k} must be a boolean`)
-    }
-    if ('workers' in cfg) {
-        validateBooleanObject(cfg.workers, 'workers', errors)
-    }
-    if ('activities' in cfg) validateBooleanObject(cfg.activities, 'activities', errors)
-    if ('experimental' in cfg) validateBooleanObject(cfg.experimental, 'experimental', errors)
-    if ('globalTimeout' in cfg) validateNumberOrString(cfg.globalTimeout, 'globalTimeout', errors)
-    if ('accountDelay' in cfg) validateDelay(cfg.accountDelay, 'accountDelay', errors)
-
-    if ('searchSettings' in cfg) {
-        if (!isObject(cfg.searchSettings)) {
-            errors.push('searchSettings must be an object')
-        } else {
-            const search = cfg.searchSettings
-            for (const key of [
-                'scrollRandomResults',
-                'clickRandomResults',
-                'runOnZeroPoints',
-                'parallelSearching',
-                'clusterSearch'
-            ]) {
-                if (key in search && typeof search[key] !== 'boolean') {
-                    errors.push(`searchSettings.${key} must be a boolean`)
-                }
-            }
-            if ('maxBonusSearches' in search && typeof search.maxBonusSearches !== 'number') {
-                errors.push('searchSettings.maxBonusSearches must be a number')
-            }
-            if (
-                'queryEngines' in search &&
-                (!Array.isArray(search.queryEngines) ||
-                    search.queryEngines.some(
-                        engine =>
-                            typeof engine !== 'string' ||
-                            !/^(?:google|wikipedia|wikirandom|hackernews|reddit|local|rss(?:\.[A-Za-z0-9_-]+){0,2})$/.test(
-                                engine
-                            )
-                    ))
-            ) {
-                errors.push('searchSettings.queryEngines contains an invalid query source')
-            }
-            if ('searchResultVisitTime' in search) {
-                validateNumberOrString(search.searchResultVisitTime, 'searchSettings.searchResultVisitTime', errors)
-            }
-            for (const delayKey of ['searchDelay', 'readDelay']) {
-                if (!(delayKey in search)) continue
-                validateDelay(search[delayKey], `searchSettings.${delayKey}`, errors)
-            }
-        }
-    }
-
-    if ('proxy' in cfg) {
-        if (!isObject(cfg.proxy)) errors.push('proxy must be an object')
-        else {
-            for (const key of ['queryEngine', 'ignoreCertificateErrors']) {
-                if (key in cfg.proxy && typeof cfg.proxy[key] !== 'boolean') {
-                    errors.push(`proxy.${key} must be a boolean`)
-                }
-            }
-        }
-    }
-    if ('consoleLogFilter' in cfg) validateLogFilter(cfg.consoleLogFilter, 'consoleLogFilter', errors)
-    if ('webhook' in cfg) {
-        if (!isObject(cfg.webhook)) {
-            errors.push('webhook must be an object')
-        } else {
-            if ('webhookLogFilter' in cfg.webhook) {
-                validateLogFilter(cfg.webhook.webhookLogFilter, 'webhook.webhookLogFilter', errors)
-            }
-            for (const key of ['discord', 'ntfy', 'telegram']) {
-                if (key in cfg.webhook && !isObject(cfg.webhook[key])) {
-                    errors.push(`webhook.${key} must be an object`)
-                }
-            }
-        }
-    }
-
-    return { ok: errors.length === 0, errors }
+    return out
 }
 
 export async function validateConfig(cfg, { projectRoot, validatorModule } = {}) {
+    const normalized = normalizeAliases(cfg)
     let validator
     try {
         validator = await loadBotValidator(projectRoot, validatorModule)
@@ -200,20 +76,23 @@ export async function validateConfig(cfg, { projectRoot, validatorModule } = {})
             via: 'bot-validator-load'
         }
     }
-    if (validator) {
-        try {
-            const value = validator.run(cfg)
-            return { ok: true, value: value ?? cfg, via: validator.via }
-        } catch (err) {
-            const issues = err?.issues
-            const errors = Array.isArray(issues)
-                ? issues.map(i => `${(i.path || []).join('.') || '(root)'}: ${i.message}`)
-                : [err instanceof Error ? err.message : String(err)]
-            return { ok: false, errors, via: validator.via }
+    if (!validator) {
+        return {
+            ok: false,
+            errors: ['Bot config schema module not found — run `npm run build` first.'],
+            via: 'missing-schema'
         }
     }
-    const res = structuralValidate(cfg)
-    return { ...res, value: cfg, via: 'structural-fallback' }
+    try {
+        const value = validator.run(normalized)
+        return { ok: true, value: value ?? normalized, via: validator.via }
+    } catch (err) {
+        const issues = err?.issues
+        const errors = Array.isArray(issues)
+            ? issues.map(i => `${(i.path || []).join('.') || '(root)'}: ${i.message}`)
+            : [err instanceof Error ? err.message : String(err)]
+        return { ok: false, errors, via: validator.via }
+    }
 }
 
 export function deepMerge(base, patch) {

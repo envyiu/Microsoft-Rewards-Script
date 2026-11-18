@@ -89,8 +89,9 @@ function headersFromIdentity(captured, requestHeaders, acceptLanguage) {
         ...(brands.length
             ? {
                   'sec-ch-ua': brands
-                      .map(({ brand, version }) =>
-                          `${JSON.stringify(String(brand))};v=${JSON.stringify(String(version))}`
+                      .map(
+                          ({ brand, version }) =>
+                              `${JSON.stringify(String(brand))};v=${JSON.stringify(String(version))}`
                       )
                       .join(', ')
               }

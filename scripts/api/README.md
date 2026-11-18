@@ -1,6 +1,8 @@
 # Microsoft Rewards Script Control API
 
-Manager account import/edit accepts `newAccountMode: boolean`. New Outlook/Hotmail imports default to true; existing accounts remain unchanged. Account responses expose `newAccount` with phase, first-success time, 168-hour deadline, service visits and daily count-only Bing queries. Workers require capability `preRewardsV1`. `warmup` Smart jobs never bootstrap Rewards or request its points; manual Desktop/Mobile windows receive the same pre-Rewards guard from the accepted worker state. Recovery email remains a private credential field and is not returned by this API.
+Manager account import/edit accepts `newAccountMode: boolean` and `newAccountPolicy: standard168h | search72h`. New imports default to enabled: Hotmail/Outlook use `standard168h`; other domains use `search72h` with no productivity-service visits. Existing accounts remain unchanged; missing policies mean `standard168h`. Account responses expose `newAccount` with policy, phase, first-success time, absolute 168/72-hour deadline, service visits and daily count-only Bing queries. Workers require capability `preRewardsV1`, plus `preRewardsSearch72hV1` for enabled search-only accounts. `warmup` Smart jobs never bootstrap Rewards or request its points; manual Desktop/Mobile windows receive the same pre-Rewards guard from the accepted worker state. Recovery email remains a private credential field and is not returned by this API.
+
+Warmup status may expose `queryCapsReached` for platforms whose daily attempt budget is exhausted. Reserved attempts and confirmed search completions are different: an unconfirmed send can consume a reservation without increasing confirmed progress. The warmup limits are 30 desktop and 20 mobile attempts per account day; they are not established daily caps for Rewards accounts. See [learning collection](../learning/README.md).
 
 > Standalone installations use the [Manager API](../../../rewards-dashboard/manager/ARCHITECTURE.md)
 > on loopback port **3012** for account/configuration/assignment writes and the
@@ -2214,7 +2216,7 @@ All variables are optional.
 | `API_ALLOW_ENV_OVERRIDES`  | `false`                       | Permit arbitrary `env` fields in `/start` and `/restart`.                                   |
 | `API_ALLOW_CONFIG_REVEAL`  | `false`                       | Permit authenticated `GET /config?reveal=1`.                                                |
 | `API_VALIDATOR_MODULE`     | auto                          | Path to a compiled module exporting `validateConfig` or `ConfigSchema`.                     |
-| `DAMRU_BRIDGE_SOCKET`      | `/run/damru/bridge.sock`     | 0600 Unix socket used for account-bound Android workers/viewers.                             |
+| `DAMRU_BRIDGE_SOCKET`      | `/run/damru/bridge.sock`      | 0600 Unix socket used for account-bound Android workers/viewers.                            |
 | `SCHEDULE_FILE`            | `<repo>/config/schedule.json` | Override the persisted schedule file path.                                                  |
 | `CRON_SCHEDULE`            | unset                         | Base schedule reported and used when no persisted schedule override exists.                 |
 | `TZ`                       | `UTC`                         | Timezone used by cron and returned by `/schedule`.                                          |
@@ -2357,7 +2359,6 @@ starting a second unusable instance.
 | `runCommand.js`     | Cross-platform resolution of the command used to launch the bot.                      |
 | `lib.js`            | Environment, project-root, logging, config-redaction, and argument helpers.           |
 
-
 ### Urgent scheduling for today
 
 `POST /smart-schedule/urgent` accepts `{ "enabled": true }` to start, or `{ "enabled": false }` to cancel. Requires the existing API authentication and schedule-write permission. An active legacy run returns `409 RUN_ACTIVE`.
@@ -2368,10 +2369,10 @@ The planner skips run windows, quiet hours, session cooldowns and retry backoff,
 
 `GET /smart-schedule` now includes `effectiveEnabled` and `urgent` (`active`, `status`, `startedAt`, `remaining`, `failed`, `expired`, `effectiveParallel`). Status is `idle`, `active`, `completed`, `incomplete`, `expired`, or `cancelled`. Expiry follows each profile's timezone; new accounts are not added to an active urgent run. Failed tasks are displayed as unfinished rather than reported as successful.
 
-
 ### Browser closure logs
 
 Planned browser cleanup emits `BROWSER` at debug level (`Browser context closed during cleanup`) followed by the existing `CLOSE-BROWSER` info message. A context closing without a cleanup request still emits a warning (`Browser context closed unexpectedly`); renderer crashes remain errors. Older builds logged every context close as a warning, including successful cleanup.
+
 # Hybrid deployment
 
 See [Hybrid Smart mode](../hybrid/README.md) for independent VPS scheduling of proxied accounts, local direct accounts and Android, private SSH transport, durable event synchronization, and manual-session handoff. Existing Smart/account responses gain optional `node`, `nodeOnline` and `hybrid` metadata when enabled. The internal session/configuration transport is authenticated and is not exposed by the dashboard.
@@ -2412,7 +2413,6 @@ The persisted cooldown also applies to Urgent mode and survives restart.
 Explicit single-account Run or targeted retry clears it. Other accounts and
 the node's schedule remain enabled. Unknown VPS runtime returns HTTP 503
 (`RUNTIME_UNKNOWN`) rather than claiming the account was stopped.
-
 
 ## Standalone Manager / Worker deployments
 
@@ -2489,3 +2489,25 @@ card-status logs expose the reason. Missing data/hashes and failed verification
 leave the worker pending. Keep earning ordinary web visits preserve activity
 opt-outs, browser identity/proxy/session, and never follow app installers or
 redemption links as a generic fallback.
+
+### Keep earning rechecks
+
+Smart account state may include `earnLastScannedAt`, `earnScanVerified` and `earnFinalCheckAt`. A completed Keep earning scan can be checked again after two hours inside an existing search session; one extra check is bounded to the final 45 minutes before the configured account deadline, respecting its run window and quiet hours. The internal execution-plan v1 search variant accepts optional boolean `recheckEarn`; warmup rejects this field. `EARN-SCAN-END` uses `verified=true|false | observedAt=<ISO timestamp>`. `EARN-CARD-CLICK` exposes title, lock artwork, completion and observed before/after balances; `balanceDelta` is an observation, not independently attributed reward credit. No new writable public endpoint is introduced.
+
+### Conservative Smart sessions
+
+`normalPolicy` in Smart configuration defaults to `{enabled:true,maxSessions:4,windowHours:24,restMinutes:90,maxQueries:5,maxTasks:4}`. `maxSessions` accepts 1–50 sessions per rolling window; the other limits may be stricter, never weaker. Rewards jobs use `accountSession`; warmup and manual sessions retain their separate policy. `accounts[index].normalPolicyStatus` returns `sessionsUsed`, `sessionLimit`, `windowHours`, `restMinutes`, `maxQueries`, `nextEligibleAt`, `blockedReason`, `recovery`. Retry/Run next/Urgent cannot bypass it. Explicit blocked runs return 409 with `SESSION_LIMIT`, `SESSION_REST`, `SESSION_UNCERTAIN`, `ACCOUNT_HOLD`, `VERIFICATION_REQUIRED` or `ACCOUNT_LOCKED`, without adding hidden one-shot work.
+
+`POST /smart-schedule/accounts/:index/release-protection` requires schedule-write permission and `{ "acknowledge": true }` after the operator resolves verification/account issues. For an uncertain old process also send `"confirmedStopped":true`; a live PID still blocks. The equivalent worker internal command is `/smart-schedule/release-protection` with exactly one `accountIndexes` entry. Release keeps all used start/query reservations and rest; it does not enable a paused schedule. Manager forwards the account route to the current owner. `NORMAL-SESSION-FAILURE` carries only a classified reason, never raw private auth data. Flyout 9 is not a banned signal.
+
+Smart `dailySearchLimits` optionally sets separate daily normal-search ranges, for example
+`{"mobile":{"min":4,"max":8},"desktop":{"min":8,"max":10}}`.
+Each account's local day selects a stable integer target per platform. Its transferred
+planner carries existing usage and durable pre-spawn reservations across restart,
+retry and manual handoff. Uncertain sends consume budget. Warmup uses the same
+lower daily limits without changing its eligibility clock or service policy.
+Daily Set and quest queries keep their existing task/session allowances; they do
+not consume this new normal-search allowance. Reaching it stops only ordinary
+searches, not pending tasks. Existing search usage at first activation is counted
+conservatively. Absent limits preserve previous daily behavior. Workers advertise
+`dailySearchLimitsV1`; Manager refuses snapshots/dispatch to unsupported workers.

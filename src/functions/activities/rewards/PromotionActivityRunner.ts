@@ -1,3 +1,4 @@
+import { learningQuery } from '../../../util/Learning'
 import { waitForActivity } from '../../../util/ActivityTiming'
 import { BaseActivity } from '../BaseActivity'
 import type { BasePromotion } from '../../../interface/DashboardData'
@@ -35,7 +36,13 @@ export class PromotionActivityRunner extends BaseActivity {
         let tab
         try {
             tab = await this.bot.newBrowserPage(page.context())
-            await tab.goto(destination.toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 })
+            this.bot.normalSession?.assertActive()
+            if (this.bot.normalSession?.active && /\/search(?:\/|$)/.test(destination.pathname)) {
+                const target = tab
+                await learningQuery('activity', this.bot.isMobile, () =>
+                    target.goto(destination.toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 })
+                )
+            } else await tab.goto(destination.toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 })
             await waitForActivity(this.bot, this.bot.utils.randomDelay(5000, 15000))
             this.bot.logger.info(
                 this.bot.isMobile,
@@ -53,12 +60,14 @@ export class PromotionActivityRunner extends BaseActivity {
 
     public async run(promotions: BasePromotion[]): Promise<void> {
         for (const [index, promotion] of promotions.entries()) {
+            this.bot.normalSession?.assertActive()
             try {
                 await this.runPromotion(promotion)
                 if (index < promotions.length - 1) {
                     await waitForActivity(this.bot, this.bot.utils.randomDelay(5000, 15000))
                 }
             } catch (error) {
+                this.bot.normalSession?.recordRuntimeError('ACTIVITY', error)
                 this.bot.logger.error(
                     this.bot.isMobile,
                     'ACTIVITY',

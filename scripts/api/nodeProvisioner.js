@@ -328,7 +328,7 @@ export class NodeProvisioner {
                     } catch {}
                     await new Promise(r => setTimeout(r, 1000))
                 }
-                if (status?.protocolVersion !== 2 || !/^[a-f0-9-]{36}$/.test(status?.nodeId || ''))
+                if (![2, 3].includes(status?.protocolVersion) || !/^[a-f0-9-]{36}$/.test(status?.nodeId || ''))
                     fail('Worker health check failed.', 'HEALTH_CHECK_FAILED', 503)
                 if (this.fleet.registry.nodes.some(n => n.id === status.nodeId))
                     fail('This worker is already registered.', 'DUPLICATE_NODE', 409)
@@ -336,7 +336,7 @@ export class NodeProvisioner {
                     id: status.nodeId,
                     name: op.name,
                     kind: 'vps',
-                    protocolVersion: 2,
+                    protocolVersion: status.protocolVersion,
                     url: connection.url,
                     token: op.token,
                     ssh: { ...op.ssh, service: connection.service },
@@ -345,6 +345,7 @@ export class NodeProvisioner {
                 this.fleet.save()
                 op.target = status.nodeId
             })
+            delete op.token
             op.phase = 'done'
             op.status = 'applied'
             op.error = null

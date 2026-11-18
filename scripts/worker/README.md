@@ -1,95 +1,98 @@
 # MSRW Worker
 
-Worker hỗ trợ chế độ acc mới: chưa vào Rewards trong 168 giờ từ buổi đăng nhập/search thành công đầu tiên, ghé OneDrive/To Do/Outlook/Calendar và search Bing theo số query (20 mobile, 30 desktop mỗi ngày). Tiến độ và thời hạn được lưu cùng planner/session khi chuyển máy. Sau hạn, worker tự dùng luồng Rewards và xử lý onboarding lần đầu; không đổi quà hoặc bật auto-redeem. Manager kiểm tra capability `preRewardsV1` trước khi giao các acc này. Giữ các acc mới tạm dừng nếu cần quay lại worker phiên bản cũ.
+Worker là máy **thực thi** của hệ thống. Nó nhận tài khoản và cấu hình đã được Manager giao, chạy Smart Scheduler cùng bot/browser, rồi lưu session, tiến độ và event journal. Worker không phải dashboard và không tự quản lý tài khoản gốc.
 
-Worker chỉ chạy tài khoản được Manager giao. Worker không có dashboard quản lý,
-không tự thêm tài khoản và không cần bản cài Manager trên cùng máy.
+Tài liệu này được đóng cùng gói phát hành Worker. Hướng dẫn cài Manager nằm tại `manager/README.md` trong repo `rewards-dashboard`.
 
-## Cài trên máy cá nhân Linux
+## Cài Worker Linux local
 
-Hỗ trợ máy local Ubuntu/Debian và Arch/CachyOS có systemd. Bộ cài dùng
-Node.js 24+ sẵn có hoặc cài Node khi thiếu. Chromium được kiểm tra trước;
-chỉ dùng sudo để cài thư viện hệ thống khi cần. VPS qua SSH dùng Ubuntu 24.04 x86_64.
-Giải nén `msrw-worker.tgz`, đứng trong thư mục đã giải nén:
+Yêu cầu: Linux có systemd và Node.js 24 trở lên. Worker local chạy dưới tài khoản desktop hiện tại để có thể mở cửa sổ trình duyệt. Bộ cài kiểm tra Chromium và thư viện cần thiết.
 
-```bash
+```sh
+mkdir -p msrw-worker
+tar -xzf msrw-worker.tgz -C msrw-worker
+cd msrw-worker
 bash install.sh --kind local
 ```
 
-Worker local chạy bằng user của phiên desktop. Các lệnh thường dùng:
+Sau khi cài:
 
-```bash
+```sh
 systemctl --user status msrw-worker
-systemctl --user restart msrw-worker
 journalctl --user -u msrw-worker -f
 ```
 
-Cấu hình duy nhất: `~/.local/share/msrw-worker/worker.env`. Trong Manager mở
-Settings → Machines → Connect installed worker, chọn Local, nhập URL
-`http://127.0.0.1:3010` và API token trong file cấu hình worker. Token không
-được in tự động vào log hay giao diện trạng thái.
+Cấu hình máy và token riêng nằm ở `~/.local/share/msrw-worker/worker.env`; dữ liệu bền vững nằm trong cùng data directory. Trong Manager mở **Settings → Machines → Connect installed worker**, chọn worker local và địa chỉ `http://127.0.0.1:3010`. Worker mới đăng ký sẽ ở trạng thái tạm dừng, chưa có tài khoản. Giao tài khoản từ Manager, đợi **Đã áp dụng**, rồi mới bật lịch.
 
-## Cài trên VPS
+## Cài Worker VPS Linux
 
-Cách ưu tiên: từ Manager chọn **Install worker over SSH**. VPS Ubuntu 24.04
-x86_64 cần SSH key và passwordless sudo. Manager kiểm tra fingerprint SSH,
-gửi cùng gói worker này và cài dịch vụ systemd. Worker mới luôn tạm dừng,
-chưa có tài khoản.
+Cách đơn giản nhất là vào **Settings → Machines → Install worker over SSH** trong Manager. Manager kiểm tra SSH host key, chuyển gói và tạo tunnel loopback. Môi trường provisioning hiện hỗ trợ Ubuntu 24.04 hoặc Debian 13 x86_64, tài khoản thường có sudo không cần hỏi mật khẩu và đăng nhập SSH bằng key.
 
-Cũng có thể giải nén và cài thủ công:
+Có thể tự giải nén gói trên VPS rồi cài:
 
-```bash
+```sh
 bash install.sh --kind remote
 sudo systemctl status msrw-worker
+sudo journalctl -u msrw-worker -f
 ```
 
-Sau đó chọn **Connect installed worker → Remote worker over SSH** trên Manager.
-Nhập thông tin SSH và token worker; Manager tạo tunnel riêng. Không mở cổng
-3010 ra Internet. Worker đã có tài khoản cần được chuyển qua công cụ migration.
+Sau đó dùng **Connect installed worker → Remote worker over SSH** trong Manager. Worker chỉ bind loopback; Manager đi qua SSH tunnel riêng. Nếu Worker đã có dữ liệu hoặc tài khoản từ hệ thống cũ, dùng quy trình migration trước khi kết nối hoặc giao tài khoản.
 
-## Android và trình duyệt thủ công
+## Cấu hình và dữ liệu
 
-Chỉ worker local hỗ trợ tài khoản không proxy và trình duyệt có giao diện.
-Damru là thành phần tùy chọn trên máy worker, không nằm trong Manager.
-Cài Damru/bridge theo hướng dẫn hiện tại, sau đó đặt
-`MRS_ANDROID_ENABLED="true"` và `DAMRU_BRIDGE_SOCKET` trong `worker.env`, rồi
-restart worker. `--android` bật khả năng này khi cài mới; nó không tự cài Damru.
+Manager là nguồn gốc của email, thông tin tài khoản, proxy, phân công và cấu hình mong muốn. File `worker.env` chỉ có danh tính máy, token API, đường dẫn data và các tùy chọn môi trường. Không nhập một danh sách tài khoản thứ hai trực tiếp lên VPS.
 
-Desktop/Mobile/Android chỉ giữ tài khoản được chọn, không giữ cả nhóm proxy.
-Chỉ chờ khi chính tài khoản đó đang chạy; các acc khác, kể cả cùng proxy, vẫn
-tiếp tục job. Tài khoản VPS được chuyển tạm về local với session hiện tại và
-trả về VPS sau khi đóng browser sạch sẽ hoặc tắt thiết bị Android. Android dùng
-lại phiên Damru riêng của tài khoản; đóng viewer không đồng nghĩa tắt thiết bị.
-Job tự động của tài khoản đang mở thủ công vẫn bị khóa trong thời gian này.
+Data directory chứa cấu hình đã nhận, Smart progress, journal, session browser, learning telemetry và diagnostics. Không xóa thư mục này để sửa lỗi worker offline, login, tunnel hoặc trạng thái cũ. Khi cần sao lưu SQLite đang chạy, dùng online backup API; đừng chỉ copy file database chính bỏ qua WAL.
 
-## Dữ liệu và cập nhật
+Worker tiếp tục lịch **đã nhận và áp dụng** khi Manager mất kết nối. Những thay đổi mới trên dashboard ở trạng thái **Chờ đồng bộ** cho đến khi Worker xác nhận revision. Worker offline không tự nhường tài khoản cho máy khác.
 
-Mã chương trình nằm riêng trong `~/.local/lib/msrw-worker/releases`.
-Session, cấu hình đã nhận, tiến độ Smart và journal nằm trong thư mục dữ liệu.
-Không chỉnh tài khoản hoặc lịch trực tiếp trên VPS: thực hiện trên Manager.
+## Desktop, Mobile và Android thủ công
 
-Worker giữ lịch đã xác nhận khi Manager offline. Nó không tự nhận tài khoản
-từ worker khác. Handoff chờ đúng tài khoản được chọn và giữ session/progress.
-Thay đổi danh sách tài khoản không ảnh hưởng job khác có thể áp dụng ngay; đổi
-cấu hình runtime vẫn cần drain. Chi tiết ở `scripts/api/README.md` trong repo
-và trong gói phát hành Worker.
-Pause và đợi tác vụ hoàn tất trước khi chạy lại bộ cài để nâng cấp.
+Mở thủ công chỉ giữ đúng tài khoản đang được yêu cầu. Nếu chính tài khoản đó đang chạy, thao tác chờ job của nó checkpoint xong; tài khoản khác, kể cả dùng chung proxy, vẫn được chạy. Khi tài khoản vốn thuộc VPS, Manager tạm chuyển session/progress sang Worker local rồi trả ownership về máy cũ khi browser đóng và session đã lưu.
 
-Có thể xem trước đường dẫn cài đặt mà không thay đổi hệ thống:
+Android cần Damru/bridge riêng trên Worker local; cài Worker không tự cài Damru. Trình xem Android đóng chưa chắc đã tắt thiết bị. Chỉ trả ownership sau khi Worker xác nhận thiết bị đã dừng. Lỗi checkpoint hoặc trạng thái không xác định giữ hold để xử lý.
 
-```bash
-bash install.sh --kind local --dry-run
+## Nền tảng đặc biệt
+
+- Windows Worker dùng bộ cài native/watchdog riêng; xem `scripts/worker/windows/README.md` trong gói. Installer Linux và nút upgrade SSH của Manager không áp dụng.
+- Docker cloud Sandbox dùng container, tunnel, backup và recovery riêng; xem `scripts/worker/sandbox-cloud/README.md`. Máy này không có systemd.
+- Tài liệu cơ chế sắp lịch trong repo nguồn là `docs/SMART_MODE_VI.md`.
+
+## Cập nhật và gỡ lỗi
+
+Trước khi thay Worker đang sử dụng, pause lịch từ Manager, đợi job hoàn tất, đóng mọi phiên Desktop/Mobile/Android và xác nhận không còn operation/handoff pending. Tạo backup nhất quán, giữ nguyên data directory và worker identity.
+
+Với Linux local:
+
+```sh
+systemctl --user status msrw-worker
+systemctl --user restart msrw-worker
+journalctl --user -u msrw-worker -n 200 --no-pager
 ```
 
-## Dựng gói từ mã nguồn
+Với VPS:
 
-```bash
+```sh
+sudo systemctl status msrw-worker
+sudo systemctl restart msrw-worker
+sudo journalctl -u msrw-worker -n 200 --no-pager
+```
+
+Khi báo lỗi, ghi lại node ID, trạng thái Online/Offline, revision mong muốn/đã áp dụng, thời điểm lỗi và mã lỗi. Không gửi token, mật khẩu, cookie, file session, proxy credentials hay nguyên file diagnostics công khai.
+
+## Tùy chọn bộ cài
+
+`--kind local` tạo user service; `--kind remote` tạo system service chạy dưới tài khoản thường. `--dry-run` chỉ in đường dẫn dự kiến; `--no-start` cài bản mới nhưng không bật service. `--android` bật capability bridge; Damru vẫn cần cài và cấu hình riêng. Đổi thư mục cài/data dùng `--install-dir` và `--data-dir`; dùng đường dẫn tuyệt đối.
+
+## Dựng gói
+
+Tại repo Worker:
+
+```sh
 npm ci
 npm run build
 npm run build:contracts
 npm run release:worker
 ```
 
-Kết quả `releases/msrw-worker.tgz` cài được độc lập, không cần checkout repo
-dashboard. Chế độ Control API/Hybrid/cron cũ chỉ dành cho tương thích và rollback;
-bộ cài worker mới luôn dùng Smart Scheduler.
+Gói phát hành nằm ở `releases/msrw-worker.tgz`. Đây là gói độc lập, không cần checkout repo Manager để cài Worker. Manager cũng được phát hành thành gói riêng.

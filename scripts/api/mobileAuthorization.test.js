@@ -362,16 +362,29 @@ test('generic Rewards content, public offers and a default header balance cannot
     assert.equal(await login.detectCurrentState(page), 'UNKNOWN')
 })
 
-for (const [selector, expected] of [['send-code', 'email-code-required'], ['password', 'password-required']]) {
+for (const [selector, expected] of [
+    ['send-code', 'email-code-required'],
+    ['password', 'password-required']
+]) {
     test(`OAuth stops promptly for ${expected} without sending codes or exposing proof details`, async () => {
         const { bot, messages } = fixture()
-        let closed = false, waited = false
+        let closed = false,
+            waited = false
         const invisible = { first: () => ({ isVisible: async () => false }) }
         const oauth = {
-            goto: async () => {}, url: () => 'https://login.live.com/oauth20_authorize.srf',
-            locator: value => value === 'input[type="password"]' && selector === 'password' ? { first: () => ({ isVisible: async () => true }) } : invisible,
+            goto: async () => {},
+            url: () => 'https://login.live.com/oauth20_authorize.srf',
+            locator: value =>
+                value === 'input[type="password"]' && selector === 'password'
+                    ? { first: () => ({ isVisible: async () => true }) }
+                    : invisible,
             getByRole: () => ({ first: () => ({ isVisible: async () => selector === 'send-code' }) }),
-            waitForURL: async () => { waited = true }, close: async () => { closed = true }
+            waitForURL: async () => {
+                waited = true
+            },
+            close: async () => {
+                closed = true
+            }
         }
         bot.newBrowserPage = async () => oauth
         const page = { context: () => ({}), request: { get: async () => ({ url: oauth.url, status: () => 200 }) } }
@@ -385,9 +398,83 @@ for (const [selector, expected] of [['send-code', 'email-code-required'], ['pass
 test('OAuth code lookalikes on another host are never exchanged', async () => {
     const { bot } = fixture()
     let exchanged = false
-    bot.http = { request: async () => { exchanged = true; return { data: {} } } }
-    bot.newBrowserPage = async () => ({ goto: async () => {}, url: () => 'https://example.test/oauth20_desktop.srf?code=private', locator: () => ({ first: () => ({ isVisible: async () => false }) }), getByRole: () => ({ first: () => ({ isVisible: async () => false }) }), waitForURL: async () => {}, close: async () => {} })
-    const page = { context: () => ({}), request: { get: async () => ({ url: () => 'https://example.test/oauth20_desktop.srf?code=private', status: () => 200 }) } }
+    bot.http = {
+        request: async () => {
+            exchanged = true
+            return { data: {} }
+        }
+    }
+    bot.newBrowserPage = async () => ({
+        goto: async () => {},
+        url: () => 'https://example.test/oauth20_desktop.srf?code=private',
+        locator: () => ({ first: () => ({ isVisible: async () => false }) }),
+        getByRole: () => ({ first: () => ({ isVisible: async () => false }) }),
+        waitForURL: async () => {},
+        close: async () => {}
+    })
+    const page = {
+        context: () => ({}),
+        request: {
+            get: async () => ({ url: () => 'https://example.test/oauth20_desktop.srf?code=private', status: () => 200 })
+        }
+    }
     assert.equal(await new MobileAccessLogin(bot, page).get('one@example.test'), '')
     assert.equal(exchanged, false)
+})
+
+test('app OAuth reuses saved session with silent SSO and retains the selected account hint', async () => {
+    const { bot } = fixture()
+    let requested,
+        browserOpened = false
+    bot.http = { request: async () => ({ data: { access_token: 'synthetic-private-token' } }) }
+    bot.newBrowserPage = async () => {
+        browserOpened = true
+        throw new Error('Unexpected interactive login')
+    }
+    const page = {
+        request: {
+            get: async url => {
+                requested = new URL(url)
+                return {
+                    url: () => 'https://login.live.com/oauth20_desktop.srf?code=synthetic-code',
+                    status: () => 200
+                }
+            }
+        }
+    }
+    assert.equal(await new MobileAccessLogin(bot, page).get('one@example.test'), 'synthetic-private-token')
+    assert.equal(requested.searchParams.get('prompt'), 'none')
+    assert.equal(requested.searchParams.get('login_hint'), 'one@example.test')
+    assert.equal(browserOpened, false)
+})
+
+test('a rejected silent SSO still permits the existing browser recovery without sending an OTP', async () => {
+    const { bot, messages } = fixture()
+    let browserUrl
+    const invisible = { first: () => ({ isVisible: async () => false }) }
+    bot.newBrowserPage = async () => ({
+        goto: async url => {
+            browserUrl = new URL(url)
+        },
+        url: () => 'https://login.live.com/oauth20_authorize.srf',
+        locator: () => invisible,
+        getByRole: () => ({ first: () => ({ isVisible: async () => true }) }),
+        close: async () => {}
+    })
+    const page = {
+        context: () => ({}),
+        request: {
+            get: async url => {
+                assert.equal(new URL(url).searchParams.get('prompt'), 'none')
+                return {
+                    url: () => 'https://login.live.com/oauth20_desktop.srf?error=interaction_required',
+                    status: () => 200
+                }
+            }
+        }
+    }
+    assert.equal(await new MobileAccessLogin(bot, page).get('one@example.test'), '')
+    assert.equal(browserUrl.searchParams.has('prompt'), false)
+    assert.equal(browserUrl.searchParams.get('login_hint'), 'one@example.test')
+    assert.ok(messages.some(m => m.message === 'App authorization needs user action | reason=email-code-required'))
 })

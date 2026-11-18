@@ -1,7 +1,8 @@
 import { waitForActivity } from '../../../util/ActivityTiming'
 import { BaseActivity } from '../BaseActivity'
+import { StreakActivation, type ActivationResult } from '../shared/StreakActivation'
 
-import type { ParsedOffer, StreakState } from '../../../browser/ReactFunc'
+import type { StreakState } from '../../../browser/ReactFunc'
 import type { DashboardData } from '../../../interface/DashboardData'
 import { VisualSearchBrowser } from './VisualSearchBrowser'
 
@@ -16,20 +17,21 @@ const MAX_ATTEMPTS = 4
 const MAX_ACQUISITION_FAILURES_PER_ATTEMPT = 3
 const REGISTRATION_CHECKS = 3
 
-type ActivationResult = 'activated' | 'already-active' | 'absent' | 'failed'
-
-interface ActivationMetadata {
-    activityType: number
-    activityTypeSource: 'react' | 'streak' | 'dashboard' | 'verified-fallback'
-    isPromotional: boolean
-}
-
-interface ActivationTarget extends ParsedOffer {
-    activationSource: 'streak' | 'offer'
-}
-
 export class VisualSearch extends BaseActivity {
     private readonly browserFlow = new VisualSearchBrowser(this.bot)
+    private readonly streakActivation = new StreakActivation(this.bot, {
+        logTag: 'VISUAL-SEARCH',
+        featureLabel: 'visual search',
+        streakTitle: 'Visual Search Streak',
+        exactOfferId: VISUAL_SEARCH_ACTIVATION_OFFER,
+        verifiedActivityTypes: VERIFIED_ACTIVITY_TYPES,
+        matchPartner: partner => /visual.?search/i.test(partner),
+        matchFuzzyOfferId: id => id.includes('visualsearch') && id.includes('activation'),
+        waitAfterReport: async delayMs => {
+            await waitForActivity(this.bot, delayMs)
+            return true
+        }
+    })
 
     public async doVisualSearch(data: DashboardData): Promise<number> {
         if (this.bot.isMobile) {
@@ -67,16 +69,7 @@ export class VisualSearch extends BaseActivity {
     }
 
     private findStreak(streaks?: StreakState[]): StreakState | undefined {
-        if (streaks) return streaks.find(s => /visual.?search/i.test(s.partner))
-
-        const snapshots = [this.bot.reactSnapshot, this.bot.reactSnapshots.desktop, this.bot.reactSnapshots.mobile]
-
-        for (const snapshot of snapshots) {
-            const streak = snapshot?.streaks.find(s => /visual.?search/i.test(s.partner))
-            if (streak) return streak
-        }
-
-        return undefined
+        return this.streakActivation.findStreak(streaks)
     }
 
     private logStreakState(streak: StreakState | undefined): void {
@@ -105,308 +98,7 @@ export class VisualSearch extends BaseActivity {
     }
 
     private async activate(data: DashboardData): Promise<ActivationResult> {
-        const offer = this.findActivationTarget()
-        if (!offer) {
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                'No visual-search activation metadata present in the streak model or generic offers across the current, desktop, or cached mobile Rewards snapshots'
-            )
-            return 'absent'
-        }
-
-        if (offer.isCompleted) {
-            this.bot.logger.info(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                `Visual search activation offer already completed | offerId=${offer.offerId}`,
-                'green'
-            )
-            return 'already-active'
-        }
-
-        if (!offer.hash) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                `Activation offer present but missing a hash | offerId=${offer.offerId}`
-            )
-            return 'failed'
-        }
-
-        if (!offer.reportable && !offer.isLocked) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                `Activation offer is not actionable | offerId=${offer.offerId}`
-            )
-            return 'failed'
-        }
-
-        const actionId = this.bot.nextActions.reportActivity
-        if (!actionId) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                'Skipping activation: "reportActivity" action id not discovered in bundle'
-            )
-            return 'failed'
-        }
-
-        const dashboard = await this.resolveDashboard(data)
-        const metadata = this.resolveActivationMetadata(offer, dashboard)
-        if (!metadata) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                `Skipping activation: no valid activity type found | offerId=${offer.offerId}`
-            )
-            return 'failed'
-        }
-
-        this.bot.logger.info(
-            this.bot.isMobile,
-            'VISUAL-SEARCH',
-            `Activating visual search | offerId=${offer.offerId} | activationSource=${offer.activationSource} | activityType=${metadata.activityType} | activityTypeSource=${metadata.activityTypeSource} | promotional=${metadata.isPromotional} | geo=${this.bot.userData.geoLocale}`
-        )
-
-        try {
-            const { status, acknowledged } = await this.bot.browser.func.reportServerAction(actionId, [
-                offer.hash,
-                metadata.activityType,
-                {
-                    offerid: offer.offerId,
-                    isPromotional: metadata.isPromotional ? 'true' : '$undefined',
-                    timezoneOffset: this.bot.userData.timezoneOffset
-                }
-            ])
-
-            await waitForActivity(this.bot, this.bot.utils.randomDelay(3000, 6000))
-            const confirmed = await this.confirmActivation(offer.offerId)
-
-            if (acknowledged || confirmed) {
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'VISUAL-SEARCH',
-                    `Activated visual search | offerId=${offer.offerId} | acknowledged=${acknowledged} | confirmed=${confirmed}`,
-                    'green'
-                )
-                return 'activated'
-            }
-
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                `Activation not acknowledged | offerId=${offer.offerId} | status=${status}`
-            )
-            return 'failed'
-        } catch (error) {
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                `Activation error | offerId=${offer.offerId} | ${error instanceof Error ? error.message : String(error)}`
-            )
-            return 'failed'
-        }
-    }
-
-    private async confirmActivation(offerId: string): Promise<boolean> {
-        try {
-            const snapshot = await this.bot.browser.func.refreshEarnSnapshot()
-            if (!snapshot) return false
-
-            this.bot.reactSnapshot = snapshot
-
-            const streak = this.findStreak(snapshot.streaks)
-            const activationOffer = snapshot.offers.find(o => o.offerId === offerId)
-            return streak?.isEnabled === true || activationOffer?.isCompleted === true
-        } catch (error) {
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                `Could not verify activation state | offerId=${offerId} | ${error instanceof Error ? error.message : String(error)}`
-            )
-            return false
-        }
-    }
-
-    private async resolveDashboard(fallback: DashboardData): Promise<DashboardData> {
-        try {
-            return await this.bot.browser.func.getDashboardData(this.bot.cookies.desktop)
-        } catch {
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                'Desktop dashboard fetch failed - falling back to the dashboard from the mobile pass'
-            )
-            return fallback
-        }
-    }
-
-    private resolveActivationMetadata(offer: ActivationTarget, data: DashboardData): ActivationMetadata | null {
-        const dashboardPromotion = this.findDashboardPromotion(data.dashboard, offer.offerId)
-
-        if (offer.activityType !== null) {
-            return {
-                activityType: offer.activityType,
-                activityTypeSource: offer.activationSource === 'streak' ? 'streak' : 'react',
-                isPromotional: offer.isPromotional || this.dashboardPromotionIsPromotional(dashboardPromotion)
-            }
-        }
-
-        const dashboardActivityType = this.dashboardPromotionActivityType(dashboardPromotion)
-        if (dashboardActivityType !== null) {
-            return {
-                activityType: dashboardActivityType,
-                activityTypeSource: 'dashboard',
-                isPromotional: offer.isPromotional || this.dashboardPromotionIsPromotional(dashboardPromotion)
-            }
-        }
-
-        const verifiedFallback = VERIFIED_ACTIVITY_TYPES.get(offer.offerId.toLowerCase())
-        if (verifiedFallback !== undefined) {
-            return {
-                activityType: verifiedFallback,
-                activityTypeSource: 'verified-fallback',
-                isPromotional: offer.isPromotional || this.dashboardPromotionIsPromotional(dashboardPromotion)
-            }
-        }
-
-        return null
-    }
-
-    private findDashboardPromotion(root: unknown, offerId: string): Record<string, unknown> | null {
-        const target = offerId.toLowerCase()
-        const pending: unknown[] = [root]
-        const visited = new Set<object>()
-
-        while (pending.length) {
-            const value = pending.pop()
-            if (!value || typeof value !== 'object' || visited.has(value)) continue
-            visited.add(value)
-
-            if (Array.isArray(value)) {
-                for (const entry of value) pending.push(entry)
-                continue
-            }
-
-            const record = value as Record<string, unknown>
-            const attributes = this.asRecord(record.attributes)
-            const candidateId = record.offerId ?? record.offerid ?? attributes?.offerid
-            if (typeof candidateId === 'string' && candidateId.toLowerCase() === target) return record
-
-            for (const entry of Object.values(record)) pending.push(entry)
-        }
-
-        return null
-    }
-
-    private dashboardPromotionActivityType(promotion: Record<string, unknown> | null): number | null {
-        if (!promotion) return null
-        const attributes = this.asRecord(promotion.attributes)
-        return this.parseActivityType(
-            promotion.activityType ?? promotion.activity_type ?? attributes?.activityType ?? attributes?.activity_type
-        )
-    }
-
-    private dashboardPromotionIsPromotional(promotion: Record<string, unknown> | null): boolean {
-        if (!promotion) return false
-        const attributes = this.asRecord(promotion.attributes)
-        const value = promotion.isPromotional ?? promotion.promotional ?? attributes?.promotional
-        return value === true || (typeof value === 'string' && value.toLowerCase() === 'true')
-    }
-
-    private parseActivityType(value: unknown): number | null {
-        const parsed = Number(value)
-        return Number.isInteger(parsed) && parsed > 0 ? parsed : null
-    }
-
-    private asRecord(value: unknown): Record<string, unknown> | null {
-        return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
-    }
-
-    private findActivationTarget(): ActivationTarget | null {
-        const snapshots = [
-            { source: 'current', snapshot: this.bot.reactSnapshot },
-            { source: 'desktop', snapshot: this.bot.reactSnapshots.desktop },
-            { source: 'mobile', snapshot: this.bot.reactSnapshots.mobile }
-        ] as const
-
-        const seen = new Set<unknown>()
-
-        // New Rewards format: activation metadata is carried directly by the streak model.
-        for (const { source, snapshot } of snapshots) {
-            if (!snapshot || seen.has(snapshot)) continue
-            seen.add(snapshot)
-
-            const streak = this.findStreak(snapshot.streaks)
-            if (!streak?.activationOfferId || !streak.activationHash) continue
-
-            if (source !== 'current') {
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'VISUAL-SEARCH',
-                    `Activation metadata missing from the current snapshot; using cached ${source} streak snapshot | offerId=${streak.activationOfferId}`
-                )
-            } else {
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'VISUAL-SEARCH',
-                    `Using visual-search activation metadata from streak model | offerId=${streak.activationOfferId}`
-                )
-            }
-
-            return {
-                offerId: streak.activationOfferId,
-                hash: streak.activationHash,
-                title: 'Visual Search Streak',
-                description: '',
-                points: 0,
-                promotionSubtype: null,
-                destination: streak.destinationUrl ?? '',
-                isCompleted: streak.isEnabled,
-                isPromotional: false,
-                isLocked: false,
-                unlockCriteria: null,
-                date: null,
-                activityType: streak.activationActivityType,
-                reportable: true,
-                activationSource: 'streak'
-            }
-        }
-
-        // Legacy/current alternate format: activation appears as a regular Rewards offer.
-        seen.clear()
-        for (const { source, snapshot } of snapshots) {
-            if (!snapshot || seen.has(snapshot)) continue
-            seen.add(snapshot)
-
-            const exact = snapshot.offers.find(o => o.offerId === VISUAL_SEARCH_ACTIVATION_OFFER)
-            const fuzzy = snapshot.offers.find(o => {
-                const id = o.offerId.toLowerCase()
-                return id.includes('visualsearch') && id.includes('activation')
-            })
-            const offer = exact ?? fuzzy
-            if (!offer) continue
-
-            if (source !== 'current') {
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'VISUAL-SEARCH',
-                    `Activation offer missing from the current snapshot; using cached ${source} offer snapshot | offerId=${offer.offerId}`
-                )
-            } else {
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'VISUAL-SEARCH',
-                    `Using visual-search activation metadata from generic offer | offerId=${offer.offerId}`
-                )
-            }
-
-            return { ...offer, activationSource: 'offer' }
-        }
-
-        return null
+        return await this.streakActivation.activate(data)
     }
 
     private async performDailySearch(): Promise<number> {

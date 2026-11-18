@@ -22,14 +22,17 @@ export async function verifyOffer(
             const observed = await bot.browser.func.getCurrentPoints().catch(() => null)
             if (observed !== null) balance = observed
         }
-        const delta = after && after.points === before.points
-            ? pointDelta(before.pointProgress, after.pointProgress) : null
+        const delta =
+            after && after.points === before.points ? pointDelta(before.pointProgress, after.pointProgress) : null
         const credit = creditedPoints(delta, beforeBalance, balance)
         if (credit !== null) gained = credit
         complete ||= after?.isCompleted === true
-        bot.logger.debug(bot.isMobile, 'OFFER-VERIFY',
+        bot.logger.debug(
+            bot.isMobile,
+            'OFFER-VERIFY',
             `Offer verification | offerId=${before.offerId} | check=${check}/3 | complete=${complete}` +
-            ` | progressDelta=${delta ?? 'unknown'} | pointsGained=${gained ?? 'unknown'}`)
+                ` | progressDelta=${delta ?? 'unknown'} | pointsGained=${gained ?? 'unknown'}`
+        )
         if (complete && gained !== null) break
     }
     return { complete, gained, balance }

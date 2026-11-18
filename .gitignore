@@ -12,6 +12,12 @@ note
 .playwright-chromium-installed
 .stfolder/
 .env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
 config/hybrid/
 
 # Independent release output

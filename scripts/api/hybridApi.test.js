@@ -319,7 +319,7 @@ test('account edits move ownership both ways and deleting the final VPS account 
     assert.ok(accounts.every(a => a.node === 'local'))
 })
 
-test('VPS restart activates a queued snapshot before resuming old urgent work', async t => {
+test('legacy VPS restart activates a queued snapshot before resuming old urgent work', async t => {
     const { request, restart, config } = await fixture(t, { MRS_NODE_ROLE: 'vps' })
     const snapshot = {
         protocolVersion: 2,
@@ -332,7 +332,12 @@ test('VPS restart activates a queued snapshot before resuming old urgent work', 
             ACCOUNT_1_PROXY_PORT: '1080'
         },
         botConfig: config,
-        schedule: { enabled: false, maxParallel: 1, profiles: [{ accountIndex: 1, allowedWorkers: [] }] }
+        schedule: {
+            enabled: false,
+            normalPolicy: { enabled: false },
+            maxParallel: 1,
+            profiles: [{ accountIndex: 1, allowedWorkers: [] }]
+        }
     }
     assert.equal((await request('/internal/hybrid/snapshot', 'PUT', snapshot)).status, 200)
     await request('/internal/hybrid/control', 'POST', {

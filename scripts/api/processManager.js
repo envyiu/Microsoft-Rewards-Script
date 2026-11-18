@@ -1,5 +1,8 @@
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
 
 import { parseLogLine, createRunState, applyLogToRunState, summarizeRunState, severityRank } from './logParser.js'
 
@@ -14,7 +17,18 @@ const BLOCKED_ENV = new Set([
 ])
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 const RESERVED_ENV_KEYS = new Set(['__PROTO__', 'PROTOTYPE', 'CONSTRUCTOR'])
-const INTERNAL_ENV_KEYS = new Set(['MRS_EXECUTION_PLAN'])
+const INTERNAL_ENV_KEYS = new Set([
+    'MRS_EXECUTION_PLAN',
+    'MRS_NORMAL_QUERY_JOURNAL',
+    'MRS_CHECKPOINT_CONTROL_FILE',
+    'MRS_RUNTIME_EVENT_JOURNAL',
+    'MRS_LEARNING_OUTBOX',
+    'MRS_LEARNING_ATTEMPT',
+    'MRS_LEARNING_LEDGER',
+    'MRS_LEARNING_ACCOUNT',
+    'MRS_LEARNING_CAPS',
+    'MRS_LEARNING_TIMEZONE'
+])
 
 export class ProcessManager extends EventEmitter {
     constructor({
@@ -24,6 +38,7 @@ export class ProcessManager extends EventEmitter {
         stopTimeoutMs = 15000,
         logBufferSize = 2000,
         historySize = 20,
+        checkpointIPC = false,
         name = 'microsoft-rewards-script',
         version = '0.0.0'
     }) {
@@ -36,6 +51,7 @@ export class ProcessManager extends EventEmitter {
         this.stopTimeoutMs = stopTimeoutMs
         this.logBufferSize = logBufferSize
         this.historySize = historySize
+        this.checkpointIPC = checkpointIPC
         this.name = name
         this.version = version
 
@@ -83,7 +99,7 @@ export class ProcessManager extends EventEmitter {
             child = spawn(this.command, args, {
                 cwd: this.cwd,
                 env,
-                stdio: ['ignore', 'pipe', 'pipe'],
+                stdio: ['ignore', 'pipe', 'pipe', ...(this.checkpointIPC ? ['ipc'] : [])],
                 detached: !IS_WIN, // own process group on POSIX so we can signal the whole tree
                 windowsHide: true
             })
@@ -98,10 +114,25 @@ export class ProcessManager extends EventEmitter {
 
         this.child = child
         this.pid = child.pid ?? null
+        this._controlFile = env.MRS_CHECKPOINT_CONTROL_FILE || null
 
         child.stdout?.on('data', d => this._ingest('stdout', d))
         child.stderr?.on('data', d => this._ingest('stderr', d))
 
+        if (this.checkpointIPC)
+            child.on('message', message => {
+                if (message?.type === 'MSRW_EVENT') {
+                    this.emit('event', message)
+                    return
+                }
+                if (
+                    !this._checkpoint ||
+                    message?.type !== 'MSRW_CHECKPOINT_ACK' ||
+                    message.requestId !== this._checkpoint.requestId
+                )
+                    return
+                this._checkpoint.status = message.saved === true ? 'saved' : 'failed'
+            })
         child.once('spawn', () => {
             this.state = 'running'
             this._controllerLog('info', `Run started (pid ${this.pid}).`)
@@ -119,7 +150,7 @@ export class ProcessManager extends EventEmitter {
         return { pid: this.pid, startedAt: this.startedAt, command: this.command, args }
     }
 
-    stop({ force = false, signalTree = true, signal = 'SIGTERM' } = {}) {
+    stop({ force = false, signalTree = true, signal = 'SIGTERM', reason = null } = {}) {
         if (this.state === 'idle') {
             const err = new Error('Cannot stop: no run is in progress.')
             err.code = 'NOT_RUNNING'
@@ -129,17 +160,74 @@ export class ProcessManager extends EventEmitter {
         const wasStopping = this.state === 'stopping'
         this.state = 'stopping'
         if (!wasStopping) {
+            this._stopReason = reason || (force ? 'forced' : 'user-stop')
             this._controllerLog('warn', force ? 'Force-stopping run (SIGKILL)…' : `Stopping run (${signal})…`)
             this._emitStatus('stopping')
-            if (force || signalTree) {
+            const canHandshake =
+                !force &&
+                !signalTree &&
+                signal === 'SIGUSR1' &&
+                ((this.checkpointIPC && this.child?.connected) || this._controlFile)
+            if (canHandshake) {
+                this._checkpoint = { requestId: crypto.randomUUID(), status: 'unknown', reason: this._stopReason }
+                if (this._controlFile) {
+                    try {
+                        const tmp = `${this._controlFile}.tmp`
+                        fs.writeFileSync(
+                            tmp,
+                            JSON.stringify({
+                                type: 'MSRW_CHECKPOINT_STOP',
+                                requestId: this._checkpoint.requestId,
+                                reason: this._stopReason
+                            }),
+                            { mode: 0o600 }
+                        )
+                        fs.renameSync(tmp, this._controlFile)
+                    } catch {}
+                }
+                if (this.checkpointIPC && this.child?.connected) {
+                    try {
+                        this.child.send(
+                            {
+                                type: 'MSRW_CHECKPOINT_STOP',
+                                requestId: this._checkpoint.requestId,
+                                reason: this._stopReason
+                            },
+                            () => {}
+                        )
+                    } catch {}
+                }
+                // Old POSIX children may not support IPC; their existing signal
+                // handler remains a compatible fallback. Windows waits for ACK.
+                if (!IS_WIN)
+                    this._checkpointFallback = setTimeout(
+                        () => {
+                            if (this.state === 'stopping' && this._checkpoint?.status === 'unknown') {
+                                try {
+                                    this.child?.kill('SIGUSR1')
+                                } catch {}
+                            }
+                        },
+                        Math.min(1000, Math.max(25, Math.floor(this.stopTimeoutMs / 4)))
+                    )
+            } else if (force || signalTree || IS_WIN) {
                 this._killTree(force ? 'SIGKILL' : signal)
             } else {
-                this.child?.kill(signal)
+                try {
+                    this.child?.kill(signal)
+                } catch (error) {
+                    this._controllerLog(
+                        'warn',
+                        `Stop signal failed (${error.code || error.name}); terminating process tree.`
+                    )
+                    this._killTree('SIGKILL')
+                }
             }
 
             this._killTimer = setTimeout(() => {
                 if (this.state !== 'idle') {
                     this._controllerLog('warn', `Did not exit within ${this.stopTimeoutMs}ms - sending SIGKILL.`)
+                    if (this._checkpoint) this._checkpoint.status = 'forced'
                     this._killTree('SIGKILL')
                 }
             }, this.stopTimeoutMs)
@@ -372,7 +460,18 @@ export class ProcessManager extends EventEmitter {
         if (!this.child || this.pid == null) return
         try {
             if (IS_WIN) {
-                spawn('taskkill', ['/pid', String(this.pid), '/T', '/F'], { windowsHide: true })
+                const taskkill = path.join(
+                    process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows',
+                    'System32',
+                    'taskkill.exe'
+                )
+                const killer = spawn(taskkill, ['/pid', String(this.pid), '/T', '/F'], { windowsHide: true })
+                killer.once('error', error => {
+                    this._controllerLog('warn', `Windows process-tree stop failed (${error.code || error.name}).`)
+                    try {
+                        this.child?.kill('SIGKILL')
+                    } catch {}
+                })
             } else {
                 try {
                     process.kill(-this.pid, signal)
@@ -392,11 +491,45 @@ export class ProcessManager extends EventEmitter {
             this._killTimer = null
         }
 
+        if (this._checkpointFallback) {
+            clearTimeout(this._checkpointFallback)
+            this._checkpointFallback = null
+        }
         this._flushPartial()
+
+        if (this._checkpoint && this._checkpoint.status === 'unknown' && this._controlFile) {
+            try {
+                const ackFile = `${this._controlFile}.ack`
+                if (fs.existsSync(ackFile)) {
+                    const ack = JSON.parse(fs.readFileSync(ackFile, 'utf8'))
+                    if (ack?.type === 'MSRW_CHECKPOINT_ACK' && ack.requestId === this._checkpoint.requestId) {
+                        this._checkpoint.status = ack.saved === true ? 'saved' : 'failed'
+                    }
+                }
+            } catch {}
+        }
+        if (this._controlFile) {
+            try {
+                fs.rmSync(this._controlFile, { force: true })
+                fs.rmSync(`${this._controlFile}.ack`, { force: true })
+            } catch {}
+            this._controlFile = null
+        }
 
         const endedAt = new Date().toISOString()
         this.lastExit = { code: code ?? null, signal: signal ?? null, at: endedAt }
         if (errorMessage) this.lastExit.error = errorMessage
+        if (this._stopReason) this.lastExit.stopReason = this._stopReason
+        if (this._checkpoint) {
+            this.lastExit.checkpoint = this._checkpoint.status
+            this.lastExit.stopOutcome =
+                this._checkpoint.status === 'saved'
+                    ? 'saved'
+                    : this._checkpoint.status === 'forced'
+                      ? 'forced'
+                      : 'unknown'
+        }
+        this._stopReason = null
 
         const label =
             errorMessage != null

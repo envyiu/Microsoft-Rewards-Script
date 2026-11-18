@@ -1,12 +1,18 @@
 import fs from 'fs'
 import path from 'path'
 
+import { accountIndexesFromEnv, envBool, envInt, envStr, parseDotEnv } from '../contracts/Env'
 import type { Account, AccountProxy, ConfigSaveFingerprint } from '../interface/Account'
 import type { Config } from '../interface/Config'
 import { validateAccounts, validateConfig } from './Validator'
 
-let configCache: Config
+let configCache: Config | undefined
 let envLoaded = false
+
+export function resetLoadCache(): void {
+    configCache = undefined
+    envLoaded = false
+}
 
 function getProjectRoot(): string {
     const cwd = process.cwd()
@@ -36,51 +42,18 @@ function resolveProjectFile(filename: string): string | undefined {
 function ensureEnvLoaded(): void {
     if (envLoaded) return
     envLoaded = true
+    if (process.env.MRS_SKIP_ENV_FILE === '1') return
 
     // Check root -> dist -> src (not in dist, but root)
     const envFile = resolveProjectFile('.env')
     if (!envFile) return
 
     const raw = fs.readFileSync(envFile, 'utf-8')
-    for (const line of raw.split(/\r?\n/)) {
-        const trimmed = line.trim()
-        if (!trimmed || trimmed.startsWith('#')) continue
-
-        const eq = trimmed.indexOf('=')
-        if (eq === -1) continue
-
-        const key = trimmed.slice(0, eq).trim()
-        const value = parseEnvValue(trimmed.slice(eq + 1))
-
+    for (const [key, value] of Object.entries(parseDotEnv(raw))) {
         if (process.env[key] === undefined) {
             process.env[key] = value
         }
     }
-}
-
-function parseEnvValue(raw: string): string {
-    const value = String(raw ?? '').trim()
-    if (value.startsWith('"') && value.endsWith('"')) {
-        try {
-            const parsed = JSON.parse(value)
-            if (typeof parsed === 'string') return parsed
-        } catch {}
-    }
-    if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1)
-    return value
-}
-
-function envStr(key: string): string | undefined {
-    const v = process.env[key]
-    if (v === undefined) return undefined
-    const trimmed = v.trim()
-    return trimmed.length ? trimmed : undefined
-}
-
-function envBool(key: string, fallback: boolean): boolean {
-    const v = envStr(key)
-    if (v === undefined) return fallback
-    return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase())
 }
 
 const deprecationWarned = new Set<string>()
@@ -94,13 +67,6 @@ function envBoolWithLegacy(primary: string, legacy: string, fallback: boolean): 
         return envBool(legacy, fallback)
     }
     return fallback
-}
-
-function envInt(key: string, fallback: number): number {
-    const v = envStr(key)
-    if (v === undefined) return fallback
-    const n = parseInt(v, 10)
-    return Number.isFinite(n) ? n : fallback
 }
 
 function buildProxy(index: string): AccountProxy {
@@ -121,10 +87,7 @@ function buildSaveFingerprint(index: string): ConfigSaveFingerprint {
 }
 
 function getAccountIndexes(): string[] {
-    return Object.keys(process.env)
-        .map(key => /^ACCOUNT_([1-9]\d*)_EMAIL$/.exec(key)?.[1])
-        .filter((index): index is string => Boolean(index && envStr(`ACCOUNT_${index}_EMAIL`)))
-        .sort((a, b) => Number(a) - Number(b))
+    return accountIndexesFromEnv(process.env).map(String)
 }
 
 export function loadAccounts(): Account[] {
@@ -145,6 +108,8 @@ export function loadAccounts(): Account[] {
                 totpSecret: envStr(`ACCOUNT_${index}_TOTP_SECRET`),
                 recoveryEmail: envStr(`ACCOUNT_${index}_RECOVERY_EMAIL`) ?? '',
                 newAccountMode: envStr(`ACCOUNT_${index}_NEW_ACCOUNT_MODE`) === 'true',
+                newAccountPolicy: (envStr(`ACCOUNT_${index}_NEW_ACCOUNT_POLICY`) || 'standard168h') as
+                    'standard168h' | 'search72h',
                 geoLocale: envStr(`ACCOUNT_${index}_GEO_LOCALE`) ?? 'auto',
                 langCode: envStr(`ACCOUNT_${index}_LANG_CODE`) ?? 'en',
                 proxy: buildProxy(index),
@@ -153,7 +118,9 @@ export function loadAccounts(): Account[] {
         }
 
         if (!accounts.length) {
-            throw new Error('No accounts found in environment. Set at least one ACCOUNT_N_EMAIL (see env.example).')
+            throw new Error(
+                'No accounts found in environment. Configure at least one ACCOUNT_1_EMAIL in .env or via the Rewards Dashboard Accounts view.'
+            )
         }
 
         return validateAccounts(accounts)

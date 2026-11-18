@@ -135,12 +135,14 @@ export function loadJsonFile(possiblePaths, required = true) {
 }
 
 export function loadConfig(projectRoot) {
-    const possiblePaths = process.env.MRS_CONFIG_FILE ? [path.resolve(process.env.MRS_CONFIG_FILE)] : [
-        path.resolve(process.cwd(), 'config.json'),
-        path.join(projectRoot, 'config.json'),
-        path.join(projectRoot, 'dist', 'config.json'),
-        path.join(projectRoot, 'src', 'config.json')
-    ]
+    const possiblePaths = process.env.MRS_CONFIG_FILE
+        ? [path.resolve(process.env.MRS_CONFIG_FILE)]
+        : [
+              path.resolve(process.cwd(), 'config.json'),
+              path.join(projectRoot, 'config.json'),
+              path.join(projectRoot, 'dist', 'config.json'),
+              path.join(projectRoot, 'src', 'config.json')
+          ]
 
     const result = loadJsonFile(possiblePaths, true)
 
@@ -226,6 +228,7 @@ export function loadAccountsFromEnv(projectRoot) {
             totpSecret: envStr(`ACCOUNT_${idx}_TOTP_SECRET`),
             recoveryEmail: envStr(`ACCOUNT_${idx}_RECOVERY_EMAIL`) ?? '',
             newAccountMode: envStr(`ACCOUNT_${idx}_NEW_ACCOUNT_MODE`) === 'true',
+            newAccountPolicy: envStr(`ACCOUNT_${idx}_NEW_ACCOUNT_POLICY`) || 'standard168h',
             geoLocale: normalizeGeoLocale(envStr(`ACCOUNT_${idx}_GEO_LOCALE`) ?? 'auto'),
             langCode: normalizeLanguageCode(envStr(`ACCOUNT_${idx}_LANG_CODE`) ?? 'en'),
             proxy: {

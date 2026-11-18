@@ -1,3 +1,4 @@
+import { learningEvent } from '../util/Learning'
 import type { MicrosoftRewardsBot } from '../index'
 
 import { DailySet } from './activities/rewards/DailySet'
@@ -51,11 +52,40 @@ export default class Activities {
         data?: DashboardData,
         final = true
     ): Promise<T> {
-        if (this.bot.executionPlan?.type !== 'workers') return action()
+        const start = performance.now(),
+            errors = this.bot.logger.workerFailureCount
+        learningEvent('activity', { task: worker, phase: 'start', platform: this.bot.isMobile ? 'mobile' : 'desktop' })
+        let returned = false
+        try {
+            const result = await this.trackWorkerImpl(worker, action, data, final)
+            returned = true
+            return result
+        } finally {
+            learningEvent('activity', {
+                task: worker,
+                phase: 'end',
+                platform: this.bot.isMobile ? 'mobile' : 'desktop',
+                durationMs: performance.now() - start,
+                returned,
+                error: !returned || this.bot.logger.workerFailureCount > errors
+            })
+        }
+    }
+
+    private async trackWorkerImpl<T>(
+        worker: SmartWorker,
+        action: () => Promise<T>,
+        data?: DashboardData,
+        final = true
+    ): Promise<T> {
+        this.bot.normalSession?.assertActive()
+        if (this.bot.executionPlan?.type !== 'workers' && this.bot.executionPlan?.type !== 'accountSession')
+            return action()
         if (data) this.workerDashboard = data
         const before = this.bot.logger.workerFailureCount
         try {
             const result = await action()
+            this.bot.normalSession?.assertActive()
             if (this.bot.logger.workerFailureCount > before) this.workerErrors.add(worker)
             if (final) {
                 if (this.workerErrors.has(worker))
@@ -77,6 +107,7 @@ export default class Activities {
     }
 
     doSearch = async (page: Page, isMobile: boolean, budget?: number): Promise<number> => {
+        this.bot.normalSession?.assertActive()
         if (this.bot.config.experimental.apiSearch) {
             return await new ApiSearch(this.bot).doSearch(isMobile, budget)
         }
@@ -97,6 +128,7 @@ export default class Activities {
     }
 
     doSearchOnBing = async (promotion: BasePromotion, page: Page): Promise<void> => {
+        this.bot.normalSession?.assertActive()
         if (this.bot.config.experimental.apiSearchOnBing) {
             await new ApiSearchOnBing(this.bot).doSearchOnBing(promotion)
             return
