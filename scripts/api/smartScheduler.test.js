@@ -1752,6 +1752,47 @@ test('Daily Set remains first and an unserved mobile quota is not permanently ou
     assert.equal(scheduler.queue[0].normalSearchBudget, 5)
 })
 
+test('Request run skips rest and stop cooldown while paused without enabling recurring work', async t => {
+    const { scheduler, account, started } = planningFixture(t)
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.document.config.enabled = false
+    scheduler.replan()
+    const state = scheduler.document.state.accounts[account.index]
+    const endedAt = new Date(Date.now() - 10 * 60000).toISOString()
+    state.protection.sessions = [{ id: 'previous', startedAt: endedAt, endedAt, queries: [] }]
+    state.manualStopUntil = new Date(Date.now() + 30 * 60000).toISOString()
+    await scheduler.retryAccounts([account.index], { runOnce: true })
+    assert.equal(started.length, 1)
+    assert.equal(scheduler.document.config.enabled, false)
+    assert.equal(state.manualStopUntil, undefined)
+    assert.equal(state.protection.sessions.length, 1)
+    // The real launcher consumes this durable request before spawning the child.
+    scheduler.document.state.onceAccounts = []
+    assert.equal(scheduler._eligibilityForDispatch(account.index, state).blockedReason, 'SESSION_REST')
+})
+
+test('Request run waits for a busy network and keeps its rest bypass through a state round trip', async t => {
+    const { scheduler, account, started } = planningFixture(t)
+    scheduler.document.config.normalPolicy.enabled = true
+    scheduler.replan()
+    scheduler.running.clear()
+    started.length = 0
+    const state = scheduler.document.state.accounts[account.index]
+    const endedAt = new Date(Date.now() - 10 * 60000).toISOString()
+    state.protection.sessions = [{ id: 'previous', startedAt: endedAt, endedAt, queries: [] }]
+    scheduler.manualLocks.set(
+        account.index + 1,
+        deriveNetworkGroup(account, scheduler.document.config.networkGroupOverride)
+    )
+    await scheduler.retryAccounts([account.index], { runOnce: true })
+    assert.equal(started.length, 0)
+    scheduler.document = JSON.parse(JSON.stringify(scheduler.document))
+    scheduler.manualLocks.clear()
+    scheduler.replan()
+    assert.equal(started.length, 1)
+    assert.equal(scheduler.document.state.accounts[account.index].protection.sessions.length, 1)
+})
+
 test('manual Run next skips rest once without refunding history or leaving a future override', t => {
     const { scheduler, account, started } = planningFixture(t)
     scheduler.document.config.normalPolicy.enabled = true

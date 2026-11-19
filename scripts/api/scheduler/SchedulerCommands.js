@@ -455,6 +455,7 @@ export const schedulerCommandMethods = {
                 if (!selected.has(profile.accountIndex)) continue
                 const account = accounts.find(a => a.index === profile.accountIndex)
                 const state = this._accountState(account, profile, new Date())
+                if (runOnce) delete state.manualStopUntil
                 if (this.document.config.normalPolicy?.enabled && !this.isPreRewardsAccount(account.index)) {
                     if (!runOnce) {
                         const selectedWorkers = [...(workers || state.workersFailed || [])]

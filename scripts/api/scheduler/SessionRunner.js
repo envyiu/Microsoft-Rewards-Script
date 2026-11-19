@@ -119,7 +119,12 @@ export const sessionRunnerMethods = {
                 return
             }
         }
-        if (this.runNextRestOverrides?.delete(job.accountIndex)) job.manualRestOverride = true
+        if (
+            this.runNextRestOverrides?.delete(job.accountIndex) ||
+            this.document.state.onceAccounts?.includes(job.accountIndex)
+        ) {
+            job.manualRestOverride = true
+        }
         if (job.earnFinalCheck) {
             accountState.earnFinalCheckAt = new Date().toISOString()
             this._save()

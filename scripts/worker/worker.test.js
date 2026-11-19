@@ -97,7 +97,7 @@ test('streak policy imports the latest observation and retains it across a worke
     assert.equal(status.smart.accounts[1].platforms.mobile.dailySearchTarget, 10)
 })
 
-test('worker preserves a used session after restart and queues targeted Run without bypassing rest', async t => {
+test('worker preserves used sessions after restart and Request run skips rest only once', async t => {
     const worker = await workerFixture(t, { kind: 'local' }),
         body = snapshot(worker)
     body.schedule.profiles[0].allowedWorkers = []
@@ -115,25 +115,23 @@ test('worker preserves a used session after restart and queues targeted Run with
     const before = (await worker.request('/internal/hybrid/status')).data.smart
     assert.equal(before.config.enabled, false)
     assert.equal(before.accounts[1].protection.sessions.length, 1)
-    const refused = await worker.request('/internal/hybrid/control', 'POST', {
+    const requested = await worker.request('/internal/hybrid/control', 'POST', {
         route: '/run-once',
         body: { accountIndexes: [1] }
     })
-    assert.equal(refused.status, 202)
-    assert.equal(refused.data.outcomes[0].state, 'queued')
-    assert.ok(refused.data.outcomes[0].blockers.some(item => item.code === 'SESSION_REST'))
+    assert.equal(requested.status, 202)
+    assert.equal(requested.data.outcomes[0].state, 'running')
+    const active = (await worker.request('/internal/hybrid/status')).data.smart
+    assert.equal(active.config.enabled, false)
+    assert.equal(active.running.length, 1)
+    assert.equal(active.accounts[1].protection.sessions.length, 2)
+    await worker.request('/internal/hybrid/control', 'POST', { route: '/stop', body: {} })
     const after = (await worker.request('/internal/hybrid/status')).data.smart
     assert.equal(after.running.length, 0)
-    assert.equal(after.accounts[1].protection.sessions.length, 1)
-    assert.equal(after.accounts[1].normalPolicyStatus.sessionsUsed, 1)
+    assert.equal(after.accounts[1].protection.sessions.length, 2)
+    assert.equal(after.accounts[1].normalPolicyStatus.sessionsUsed, 2)
     assert.equal(after.accounts[1].normalPolicyStatus.blockedReason, 'SESSION_REST')
-    const released = await worker.request('/internal/hybrid/control', 'POST', {
-        route: '/smart-schedule/release-protection',
-        body: { accountIndexes: [1], acknowledge: true }
-    })
-    assert.equal(released.status, 202)
-    assert.equal(released.data.smart.accounts[1].normalPolicyStatus.blockedReason, 'SESSION_REST')
-    assert.equal(released.data.smart.config.enabled, false)
+    assert.deepEqual(after.onceAccounts || [], [])
 })
 
 test('worker restores Smart state from last-good file after primary corruption', async t => {

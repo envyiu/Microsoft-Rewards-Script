@@ -124,7 +124,7 @@ export function planNormalAccountJob(
 export const normalPlannerMethods = {
     evaluateAccountLocks(index, state, now = Date.now()) {
         const numericIndex = Number(index)
-        const status = sessionEligibility(state, this.document.config.normalPolicy, now)
+        const status = this._eligibilityForDispatch(numericIndex, state, now)
         const runningValues = this.running ? [...this.running.values()] : []
         const running = runningValues.some(r => r.job.accountIndex === numericIndex)
         if (status.blockedReason === 'SESSION_UNCERTAIN' && running) {
@@ -169,9 +169,10 @@ export const normalPlannerMethods = {
         return this.evaluateAccountLocks(index, state)
     },
 
-    _eligibilityForDispatch(index, state) {
+    _eligibilityForDispatch(index, state, now = Date.now()) {
         const policy = this.document.config.normalPolicy
-        return sessionEligibility(state, this.runNextRestOverrides?.has(index) ? { ...policy, restMinutes: 0 } : policy)
+        const requested = this.document.state.onceAccounts?.includes(index) || this.runNextRestOverrides?.has(index)
+        return sessionEligibility(state, requested ? { ...policy, restMinutes: 0 } : policy, now)
     },
 
     _grantRunNextRestOverrides() {
