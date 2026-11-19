@@ -7,7 +7,8 @@ import {
     sanitizeSignInLabel,
     type SignInMethodOption
 } from './LoginSelectors'
-import { canPromptForInput } from './methods/LoginUtils'
+import { matchesMaskedEmailHint, pollFviaInboxesCode } from './methods/FviaInboxesMail'
+import { canPromptForInput, getSubtitleMessage } from './methods/LoginUtils'
 
 export async function clickSignInMethodOption(host: Login, page: Page, option: SignInMethodOption): Promise<boolean> {
     const ghostClicked = await host.bot.browser.utils.ghostClick(page, option.selector)
@@ -28,6 +29,113 @@ export async function handleTotp2Fa(host: Login, page: Page, account: Account): 
     return true
 }
 
+interface PasswordSwitchCandidate {
+    selector: string
+    locator: ReturnType<Page['locator']>
+    priority: 1 | 2
+}
+
+const PASSWORD_SWITCH_IGNORE_REGEX = /forgot|reset|quên\s*mật\s*khẩu|đặt\s*lại/i
+const PASSWORD_SWITCH_DIRECT_CODE_REGEX = /email.*code|send.*code|use.*code|gửi\s*mã|nhận\s*mã|@|fviainboxes/i
+const PASSWORD_SWITCH_OTHER_WAYS_REGEX =
+    /other\s*ways|sign\s*in\s*another\s*way|another\s*way|cách\s*khác|tùy\s*chọn\s*đăng\s*nhập/i
+
+async function isSelectorQuickVisible(page: Page, selector: string): Promise<boolean> {
+    if (typeof page.locator === 'function') {
+        const visible = await page
+            .locator(selector)
+            .first()
+            .isVisible()
+            .catch(() => null)
+        if (typeof visible === 'boolean') return visible
+    }
+    return page
+        .waitForSelector(selector, { state: 'visible', timeout: 250 })
+        .then(() => true)
+        .catch(() => false)
+}
+
+function recordVerificationOutcomeIfActive(host: Login): void {
+    if (host.bot.normalSession?.active) {
+        host.bot.normalSession.recordScopedOutcome('account', 'verification')
+        host.bot.logger.warn(host.bot.isMobile, 'LOGIN', 'verification required: Microsoft sign-in challenge')
+    }
+}
+
+export async function trySwitchPasswordToEmailCode(host: Login, page: Page, account: Account): Promise<boolean> {
+    if (typeof page.locator !== 'function') return false
+
+    const candidates: PasswordSwitchCandidate[] = []
+
+    const footerActions = page.locator(host.selectors.footerAction)
+    const footerCount = await footerActions.count().catch(() => 0)
+    for (let index = 0; index < footerCount; index++) {
+        const locator = footerActions.nth(index)
+        if (!(await locator.isVisible().catch(() => false))) continue
+        const text = (await locator.innerText({ timeout: 200 }).catch(() => '')).trim()
+        if (!text || PASSWORD_SWITCH_IGNORE_REGEX.test(text)) continue
+        if (PASSWORD_SWITCH_DIRECT_CODE_REGEX.test(text)) {
+            candidates.push({ selector: `${host.selectors.footerAction} >> nth=${index}`, locator, priority: 1 })
+        } else if (PASSWORD_SWITCH_OTHER_WAYS_REGEX.test(text)) {
+            candidates.push({ selector: `${host.selectors.footerAction} >> nth=${index}`, locator, priority: 2 })
+        }
+    }
+
+    for (const legacySelector of ['#otcLoginLink', '#idA_PWD_SwitchToOTC', '#idA_PWD_SwitchToCredPicker']) {
+        const locator = page.locator(legacySelector).first()
+        if (!(await locator.isVisible().catch(() => false))) continue
+        const text = (await locator.innerText({ timeout: 200 }).catch(() => '')).trim()
+        if (text && PASSWORD_SWITCH_IGNORE_REGEX.test(text)) continue
+        const priority: 1 | 2 = legacySelector === '#idA_PWD_SwitchToCredPicker' ? 2 : 1
+        candidates.push({ selector: legacySelector, locator, priority })
+    }
+
+    candidates.sort((a, b) => a.priority - b.priority)
+    const chosen = candidates[0]
+    if (!chosen) return false
+
+    host.bot.logger.info(
+        host.bot.isMobile,
+        'LOGIN',
+        chosen.priority === 1
+            ? 'Switching from password prompt directly to email-code sign-in'
+            : 'Opening alternative sign-in methods to prefer email-code over password'
+    )
+
+    if (chosen.priority === 1) {
+        await host.prepareEmailCodeRequest(account)
+    }
+
+    const clicked = host.bot.browser?.utils?.ghostClick
+        ? await host.bot.browser.utils.ghostClick(page, chosen.selector)
+        : false
+    const finalClicked =
+        clicked ||
+        (await chosen.locator
+            .click()
+            .then(() => true)
+            .catch(() => false))
+    if (!finalClicked) return false
+
+    await host.waitForIdle(page, 'after password-to-code switch')
+    return !(await isSelectorQuickVisible(page, host.selectors.passwordEntry))
+}
+
+function selectPreferredEmailOption(
+    emailOptions: SignInMethodOption[],
+    recoveryEmail: string
+): SignInMethodOption | null {
+    const withHintMatch = emailOptions.find(
+        option => option.label.includes('@') && matchesMaskedEmailHint(recoveryEmail, option.label)
+    )
+    if (withHintMatch) return withHintMatch
+
+    const genericOption = emailOptions.find(option => !option.label.includes('@'))
+    if (genericOption) return genericOption
+
+    return null
+}
+
 export async function handleSignInMethodPicker(host: Login, page: Page, account: Account): Promise<boolean> {
     const options = await getSignInMethodOptions(page, host.selectors.signInTile)
     if (!host.signInMethodsLogged) {
@@ -41,7 +149,45 @@ export async function handleSignInMethodPicker(host: Login, page: Page, account:
     const methods = options.map(option => ({ option, type: classifySignInMethod(option) }))
     const passwordOption = methods.find(method => method.type === 'PASSWORD')?.option
     const authenticatorOption = methods.find(method => method.type === 'AUTHENTICATOR')?.option
-    const emailOption = methods.find(method => method.type === 'EMAIL')?.option
+    const emailOptions = methods.filter(method => method.type === 'EMAIL').map(method => method.option)
+    const emailOption = emailOptions[0]
+
+    if (host.preferEmailCodeOverPassword && host.canAutoHandleEmailCode()) {
+        const preferredEmailOption = selectPreferredEmailOption(emailOptions, account.recoveryEmail)
+        const emailIconOldFound =
+            preferredEmailOption || emailOptions.length > 0
+                ? false
+                : await host.checkSelector(page, host.selectors.emailIconOld)
+
+        if (preferredEmailOption || emailIconOldFound) {
+            host.bot.logger.info(
+                host.bot.isMobile,
+                'LOGIN',
+                'Preferring email-code sign-in over password for fviainboxes recovery email'
+            )
+            host.passwordlessMethodSelected = false
+            await host.prepareEmailCodeRequest(account)
+
+            const clicked = preferredEmailOption
+                ? await clickSignInMethodOption(host, page, preferredEmailOption)
+                : await host.bot.browser.utils.ghostClick(page, host.selectors.emailIconOld)
+
+            if (!clicked) {
+                host.bot.logger.warn(host.bot.isMobile, 'LOGIN', 'Could not select email-code sign-in method')
+                return false
+            }
+
+            await host.waitForIdle(page, 'after email method selection')
+            return true
+        }
+
+        host.bot.logger.info(
+            host.bot.isMobile,
+            'LOGIN',
+            'No matching fviainboxes email sign-in method available; falling back to standard methods'
+        )
+        host.preferEmailCodeOverPassword = false
+    }
 
     if (account.password && passwordOption) {
         host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Password sign-in is available; selecting it')
@@ -131,7 +277,7 @@ export async function handleSignInMethodPicker(host: Login, page: Page, account:
     return false
 }
 
-export async function handleEmailVerificationAlternatives(host: Login, page: Page, account: Account): Promise<boolean> {
+async function tryEmailVerificationAlternativesFallback(host: Login, page: Page, account: Account): Promise<boolean> {
     if (!account.password) {
         if (!canPromptForInput()) {
             host.bot.logger.error(
@@ -190,7 +336,54 @@ export async function handleEmailVerificationAlternatives(host: Login, page: Pag
     return false
 }
 
-export async function handleOtpCodeEntry(host: Login, page: Page): Promise<boolean> {
+export async function handleAutoRecoveryEmail(host: Login, page: Page, account: Account): Promise<boolean> {
+    await host.waitForIdle(page, 'on recovery page')
+
+    const subtitle = await getSubtitleMessage(page).catch(() => null)
+    if (!matchesMaskedEmailHint(account.recoveryEmail, subtitle)) {
+        host.bot.logger.warn(
+            host.bot.isMobile,
+            'LOGIN',
+            'Verification destination hint does not match fviainboxes recovery email; falling back'
+        )
+        host.fviaAutoCodeFailed = true
+        host.preferEmailCodeOverPassword = false
+        if (!host.passwordAttempted && account.password) {
+            if (await tryEmailVerificationAlternativesFallback(host, page, account)) return true
+        }
+        recordVerificationOutcomeIfActive(host)
+        return false
+    }
+
+    await host.prepareEmailCodeRequest(account)
+    const submitted = await host.recoveryLogin.fillAndSubmitEmail(page, account.recoveryEmail)
+    if (submitted.ok) {
+        host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Submitted fviainboxes recovery email for verification code')
+        return true
+    }
+
+    host.bot.logger.warn(
+        host.bot.isMobile,
+        'LOGIN',
+        `Failed to submit recovery email${submitted.error ? `: ${sanitizeSignInLabel(submitted.error)}` : ''}`
+    )
+    host.fviaAutoCodeFailed = true
+    host.preferEmailCodeOverPassword = false
+    if (!host.passwordAttempted && account.password) {
+        if (await tryEmailVerificationAlternativesFallback(host, page, account)) return true
+    }
+    recordVerificationOutcomeIfActive(host)
+    return false
+}
+
+export async function handleEmailVerificationAlternatives(host: Login, page: Page, account: Account): Promise<boolean> {
+    if (host.canAutoHandleEmailCode()) {
+        return handleAutoRecoveryEmail(host, page, account)
+    }
+    return tryEmailVerificationAlternativesFallback(host, page, account)
+}
+
+async function escapeOtpCodeEntry(host: Login, page: Page): Promise<boolean> {
     host.bot.logger.info(
         host.bot.isMobile,
         'LOGIN',
@@ -202,7 +395,7 @@ export async function handleOtpCodeEntry(host: Login, page: Page): Promise<boole
         if (clicked) {
             await host.waitForIdle(page, 'after OTP alternative sign-in action')
 
-            const stillOnOtp = await host.checkSelector(page, host.selectors.otpCodeEntry)
+            const stillOnOtp = await isSelectorQuickVisible(page, host.selectors.otpCodeEntry)
             if (!stillOnOtp) {
                 const methodPickerVisible =
                     (await host.checkSelector(page, host.selectors.signInTile)) ||
@@ -242,4 +435,86 @@ export async function handleOtpCodeEntry(host: Login, page: Page): Promise<boole
     }
 
     return true
+}
+
+async function failOverOtpToPasswordOrHold(host: Login, page: Page, account: Account): Promise<boolean> {
+    host.fviaAutoCodeFailed = true
+    host.preferEmailCodeOverPassword = false
+    if (!host.passwordAttempted && account.password) {
+        host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Falling back from fviainboxes OTP to password/alternative')
+        if (await escapeOtpCodeEntry(host, page)) return true
+    }
+    recordVerificationOutcomeIfActive(host)
+    return false
+}
+
+export async function handleOtpCodeEntry(host: Login, page: Page, account?: Account): Promise<boolean> {
+    if (!account || !host.canAutoHandleEmailCode()) {
+        return escapeOtpCodeEntry(host, page)
+    }
+
+    const subtitle = await getSubtitleMessage(page).catch(() => null)
+    if (!matchesMaskedEmailHint(account.recoveryEmail, subtitle)) {
+        host.bot.logger.warn(
+            host.bot.isMobile,
+            'LOGIN',
+            'OTP destination hint does not match fviainboxes recovery email; falling back'
+        )
+        return failOverOtpToPasswordOrHold(host, page, account)
+    }
+
+    host.emailCodeAttempts++
+    if (host.emailCodeAttempts > 2) {
+        host.bot.logger.warn(host.bot.isMobile, 'LOGIN', 'Exceeded maximum fviainboxes OTP attempts; falling back')
+        return failOverOtpToPasswordOrHold(host, page, account)
+    }
+
+    host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'OTP code entry detected; polling fviainboxes for code')
+    const pollResult = await pollFviaInboxesCode({
+        address: account.recoveryEmail,
+        sinceMs: host.emailCodeRequestedAtMs ?? host.loginStartedAtMs,
+        knownMessageIds: host.emailCodeKnownMessageIds,
+        shouldAbort: () => Boolean(host.bot.shuttingDown) || page.isClosed(),
+        onWaitLog: remainingSeconds => {
+            host.bot.logger.debug(
+                host.bot.isMobile,
+                'LOGIN-CODE',
+                `Waiting for fviainboxes OTP code (${remainingSeconds}s remaining)`
+            )
+        },
+        fetchImpl: host.fviaFetchImpl,
+        ...host.fviaPollOptions
+    })
+
+    if (host.bot.shuttingDown) throw new Error('Login interrupted by session checkpoint')
+    if (page.isClosed()) throw new Error('Page closed unexpectedly')
+
+    if (!pollResult) {
+        host.bot.logger.warn(host.bot.isMobile, 'LOGIN', 'Timed out waiting for verification code from fviainboxes')
+        return failOverOtpToPasswordOrHold(host, page, account)
+    }
+
+    if (pollResult.messageId) {
+        host.emailCodeKnownMessageIds.add(pollResult.messageId)
+    }
+    host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Received verification code from fviainboxes; submitting')
+
+    const submitted = await host.codeLogin.submitCode(page, pollResult.code)
+    if (submitted.ok) {
+        host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Verification code submitted successfully')
+        return true
+    }
+
+    host.bot.logger.warn(
+        host.bot.isMobile,
+        'LOGIN',
+        `Verification code rejected${submitted.error ? `: ${sanitizeSignInLabel(submitted.error)}` : ''}`
+    )
+    await host.codeLogin.clearCodeInputs(page)
+
+    if (host.emailCodeAttempts < 2) {
+        return true
+    }
+
+    return failOverOtpToPasswordOrHold(host, page, account)
 }

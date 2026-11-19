@@ -6,11 +6,15 @@ import { advanceMicrosoftWelcome } from '../MicrosoftWelcome'
 import type { Login } from './Login'
 import { emitRuntimeEvent } from '../../util/RuntimeEvents'
 import { normalizeSignInText, type LoginState } from './LoginSelectors'
+import { matchesMaskedEmailHint } from './methods/FviaInboxesMail'
+import { getSubtitleMessage } from './methods/LoginUtils'
 import {
+    handleAutoRecoveryEmail,
     handleEmailVerificationAlternatives,
     handleOtpCodeEntry,
     handleSignInMethodPicker,
-    handleTotp2Fa
+    handleTotp2Fa,
+    trySwitchPasswordToEmailCode
 } from './Totp2FaHandler'
 
 export async function detectCurrentState(host: Login, page: Page): Promise<LoginState> {
@@ -146,7 +150,33 @@ export async function detectCurrentState(host: Login, page: Page): Promise<Login
             /[\w.+*-]+@[\w.*-]+\.[a-z]{2,}/i.test(normalizedFooterAction) ||
             /(?:\+?\d|[*xX])(?:[\d\s().*xX-]{4,})(?:\d|[*xX])/.test(normalizedFooterAction)
 
-        if (footerAction && !footerTargetsSpecificProof && !host.passwordlessMethodSelected) {
+        let preferPrimarySendCode = false
+        if (host.preferEmailCodeOverPassword && host.canAutoHandleEmailCode()) {
+            const [primaryButtonText, subtitle] = await Promise.all([
+                page
+                    .locator(host.selectors.primaryButton)
+                    .first()
+                    .innerText({ timeout: 200 })
+                    .catch(() => ''),
+                getSubtitleMessage(page).catch(() => null)
+            ])
+            const normalizedPrimary = normalizeSignInText(primaryButtonText)
+            if (
+                /(?:send\s*(?:a\s*)?code|get\s*(?:a\s*)?code|gửi\s*mã|nhận\s*mã)/i.test(normalizedPrimary) &&
+                matchesMaskedEmailHint(host.currentRecoveryEmail, subtitle)
+            ) {
+                preferPrimarySendCode = true
+            }
+        }
+
+        if (preferPrimarySendCode) {
+            host.bot.logger.debug(
+                host.bot.isMobile,
+                'DETECT-STATE',
+                'Preferring primary send-code action over footer alternative for fviainboxes recovery email'
+            )
+            results.push('PASSWORDLESS_SEND_CODE')
+        } else if (footerAction && !footerTargetsSpecificProof && !host.passwordlessMethodSelected) {
             host.bot.logger.debug(host.bot.isMobile, 'DETECT-STATE', 'Alternative sign-in methods are available')
             results.push('FOOTER_ACTION')
         } else {
@@ -276,14 +306,33 @@ export async function handleLoginState(host: Login, state: LoginState, page: Pag
 
         case 'EMAIL_INPUT': {
             host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Entering email')
+            if (host.canAutoHandleEmailCode()) {
+                await host.prepareEmailCodeRequest(account)
+            }
             const result = await host.emailLogin.enterEmail(page, account.email)
             if (result !== 'ok') return false
+            if (host.canAutoHandleEmailCode()) {
+                host.emailCodeRequestedAtMs = Date.now()
+            }
             await host.waitForIdle(page, 'after email entry')
             host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Email entered successfully')
             return true
         }
 
         case 'PASSWORD_INPUT': {
+            if (
+                host.preferEmailCodeOverPassword &&
+                host.canAutoHandleEmailCode() &&
+                !host.emailCodeSwitchedFromPassword
+            ) {
+                const switched = await trySwitchPasswordToEmailCode(host, page, account)
+                if (switched) {
+                    host.emailCodeSwitchedFromPassword = true
+                    return true
+                }
+                host.preferEmailCodeOverPassword = false
+            }
+
             if (!account.password) {
                 host.bot.logger.info(
                     host.bot.isMobile,
@@ -303,6 +352,7 @@ export async function handleLoginState(host: Login, state: LoginState, page: Pag
             host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Entering password')
             const result = await host.emailLogin.enterPassword(page, account.password)
             if (result === 'error') return false
+            host.passwordAttempted = true
             await host.waitForIdle(page, 'after password entry')
             host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Password entered successfully')
             return true
@@ -322,6 +372,9 @@ export async function handleLoginState(host: Login, state: LoginState, page: Pag
 
         case 'PASSWORDLESS_SEND_CODE': {
             host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Continuing with primary sign-in method')
+            if (host.canAutoHandleEmailCode()) {
+                await host.prepareEmailCodeRequest(account)
+            }
             const clicked = await host.bot.browser.utils.ghostClick(page, host.selectors.primaryButton)
             if (!clicked) {
                 host.bot.logger.warn(host.bot.isMobile, 'LOGIN', 'Could not continue with primary sign-in method')
@@ -335,6 +388,9 @@ export async function handleLoginState(host: Login, state: LoginState, page: Pag
             return handleSignInMethodPicker(host, page, account)
 
         case 'RECOVERY_EMAIL_INPUT': {
+            if (host.canAutoHandleEmailCode()) {
+                return handleAutoRecoveryEmail(host, page, account)
+            }
             host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Recovery email input detected')
             await host.waitForIdle(page, 'on recovery page')
             host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Initiating recovery email handler')
@@ -402,7 +458,7 @@ export async function handleLoginState(host: Login, state: LoginState, page: Pag
         }
 
         case 'OTP_CODE_ENTRY':
-            return handleOtpCodeEntry(host, page)
+            return handleOtpCodeEntry(host, page, account)
 
         case 'UNKNOWN': {
             const rawUrl = page.url()

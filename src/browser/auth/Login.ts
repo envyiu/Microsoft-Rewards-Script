@@ -15,6 +15,7 @@ import {
     verifyBingSession
 } from './SessionVerifier'
 import { EmailLogin } from './methods/EmailLogin'
+import { isFviaInboxesEmail, snapshotFviaMessageIds } from './methods/FviaInboxesMail'
 import { CodeLogin } from './methods/GetACodeLogin'
 import { MobileAccessLogin } from './methods/MobileAccessLogin'
 import { PasswordlessLogin } from './methods/PasswordlessLogin'
@@ -40,6 +41,25 @@ export class Login {
     public serviceHosts: string[] = []
     public unknownServiceChecks = 0
 
+    public fviaAutoCodeEnabled = false
+    public preferEmailCodeOverPassword = false
+    public fviaAutoCodeFailed = false
+    public emailCodeSwitchedFromPassword = false
+    public passwordAttempted = false
+    public currentRecoveryEmail = ''
+    public loginStartedAtMs = 0
+    public emailCodeRequestedAtMs: number | null = null
+    public emailCodeKnownMessageIds = new Set<string>()
+    public emailCodeSnapshotLoaded = false
+    public emailCodeAttempts = 0
+    public fviaFetchImpl?: typeof fetch
+    public fviaPollOptions?: {
+        timeoutMs?: number
+        pollIntervalMs?: number
+        requestTimeoutMs?: number
+        sleep?: (ms: number) => Promise<void>
+    }
+
     public readonly selectors: LoginSelectors = LOGIN_SELECTORS
 
     constructor(public readonly bot: MicrosoftRewardsBot) {
@@ -50,9 +70,39 @@ export class Login {
         this.recoveryLogin = new RecoveryLogin(this.bot)
     }
 
+    public initAuthFlowState(account?: Partial<Account>): void {
+        this.currentRecoveryEmail = account?.recoveryEmail?.trim() ?? ''
+        this.fviaAutoCodeEnabled = isFviaInboxesEmail(this.currentRecoveryEmail)
+        this.preferEmailCodeOverPassword = this.fviaAutoCodeEnabled
+        this.fviaAutoCodeFailed = false
+        this.emailCodeSwitchedFromPassword = false
+        this.passwordAttempted = false
+        this.loginStartedAtMs = Date.now()
+        this.emailCodeRequestedAtMs = null
+        this.emailCodeKnownMessageIds = new Set<string>()
+        this.emailCodeSnapshotLoaded = false
+        this.emailCodeAttempts = 0
+    }
+
+    public canAutoHandleEmailCode(): boolean {
+        return this.fviaAutoCodeEnabled && !this.fviaAutoCodeFailed
+    }
+
+    public async prepareEmailCodeRequest(account?: Partial<Account>): Promise<void> {
+        const recovery = account?.recoveryEmail?.trim() || this.currentRecoveryEmail
+        if (!isFviaInboxesEmail(recovery)) return
+        if (!this.emailCodeSnapshotLoaded) {
+            const existingIds = await snapshotFviaMessageIds(recovery, { fetchImpl: this.fviaFetchImpl })
+            for (const id of existingIds) this.emailCodeKnownMessageIds.add(id)
+            this.emailCodeSnapshotLoaded = true
+        }
+        this.emailCodeRequestedAtMs = Date.now()
+    }
+
     async login(page: Page, account: Account, { rewards = true, startUrl = undefined as string | undefined } = {}) {
         this.rewardsLogin = rewards
         this.firstPartyWelcomeActions = 0
+        this.initAuthFlowState(account)
         this.serviceHost = startUrl ? new URL(startUrl).hostname : null
         this.serviceHosts =
             this.serviceHost === 'to-do.live.com'
@@ -119,6 +169,7 @@ export class Login {
                 const state = await this.detectCurrentState(page)
                 if (
                     this.bot.normalSession?.active &&
+                    !this.canAutoHandleEmailCode() &&
                     ['EMAIL_VERIFICATION_INPUT', 'RECOVERY_EMAIL_INPUT', 'OTP_CODE_ENTRY'].includes(state)
                 ) {
                     this.bot.normalSession.recordScopedOutcome('account', 'verification')

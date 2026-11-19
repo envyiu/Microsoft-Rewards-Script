@@ -5,6 +5,9 @@ import { canPromptForInput, getErrorMessage, getSubtitleMessage, promptInput } f
 export class CodeLogin {
     private readonly textInputSelector = '[data-testid="codeInputWrapper"]'
     private readonly secondairyInputSelector = 'input[id="otc-confirmation-input"], input[name="otc"]'
+    private readonly otpInputsSelector =
+        '[data-testid="codeEntry"] input, [data-testid="codeInputWrapper"] input, input[id="otc-confirmation-input"], input[name="otc"]'
+    private readonly submitButtonSelector = 'button[data-testid="primaryButton"], button[type="submit"]'
     private readonly emailVerificationInputSelectors = [
         'input#proof-confirmation-email-input',
         '[data-testid="proof-confirmation"]'
@@ -13,6 +16,71 @@ export class CodeLogin {
     private readonly maxManualAttempts = 5
 
     constructor(private bot: MicrosoftRewardsBot) {}
+
+    private async findVisibleCodeInputs(page: Page) {
+        if (typeof page.locator !== 'function') return []
+        const locator = page.locator(this.otpInputsSelector)
+        const count = await locator.count().catch(() => 0)
+        const visible = []
+        for (let i = 0; i < count; i++) {
+            const candidate = locator.nth(i)
+            if (await candidate.isVisible().catch(() => false)) {
+                visible.push(candidate)
+            }
+        }
+        return visible
+    }
+
+    async clearCodeInputs(page: Page): Promise<void> {
+        const visibleInputs = await this.findVisibleCodeInputs(page)
+        if (visibleInputs.length > 0) {
+            for (const input of visibleInputs) {
+                await input.click().catch(() => {})
+                await input.fill('').catch(async () => {
+                    await page.keyboard?.press?.('Control+A').catch(() => {})
+                    await page.keyboard?.press?.('Backspace').catch(() => {})
+                })
+            }
+            return
+        }
+
+        const inputToClear = await page.$(this.textInputSelector).catch(() => null)
+        if (inputToClear) {
+            await inputToClear.click().catch(() => {})
+            await page.keyboard?.press?.('Control+A').catch(() => {})
+            await page.keyboard?.press?.('Backspace').catch(() => {})
+        }
+    }
+
+    private async submitCodeFormIfStillVisible(page: Page): Promise<void> {
+        const stillVisible =
+            (await this.findVisibleCodeInputs(page)).length > 0 ||
+            (await page
+                .waitForSelector(`${this.textInputSelector}, ${this.secondairyInputSelector}`, {
+                    state: 'visible',
+                    timeout: 150
+                })
+                .then(() => true)
+                .catch(() => false))
+
+        if (!stillVisible) return
+
+        const submitVisible = await page
+            .waitForSelector(this.submitButtonSelector, { state: 'visible', timeout: 300 })
+            .catch(() => null)
+        if (submitVisible) {
+            const ghostClicked = this.bot.browser?.utils?.ghostClick
+                ? await this.bot.browser.utils.ghostClick(page, this.submitButtonSelector)
+                : false
+            if (ghostClicked) return
+            if (typeof submitVisible.click === 'function') {
+                await submitVisible.click().catch(() => {})
+                return
+            }
+        }
+
+        await page.keyboard?.press?.('Enter')
+    }
 
     private async findEmailVerificationInput(page: Page) {
         for (const selector of this.emailVerificationInputSelectors) {
@@ -26,35 +94,68 @@ export class CodeLogin {
 
     private async fillCode(page: Page, code: string): Promise<boolean> {
         try {
+            const visibleInputs = await this.findVisibleCodeInputs(page)
+            if (visibleInputs.length === code.length && code.length > 1) {
+                const first = visibleInputs[0]
+                if (!first) return false
+                await first.click().catch(() => {})
+                if (typeof page.keyboard?.type === 'function') {
+                    await page.keyboard.type(code, { delay: 50 })
+                }
+                for (let i = 0; i < visibleInputs.length; i++) {
+                    const box = visibleInputs[i]
+                    const char = code[i]
+                    if (!box || !char) continue
+                    const currentVal = await box.inputValue().catch(() => undefined)
+                    if (currentVal !== char) {
+                        await box.fill(char).catch(() => {})
+                    }
+                }
+                await this.bot.utils.wait(500)
+                await this.submitCodeFormIfStillVisible(page)
+                this.bot.logger.info(this.bot.isMobile, 'LOGIN-CODE', 'Filled code input')
+                return true
+            }
+
+            if (visibleInputs.length >= 1) {
+                const target = visibleInputs[0]
+                if (!target) return false
+                await target.click().catch(() => {})
+                await target.fill('').catch(() => {})
+                if (typeof page.keyboard?.type === 'function') {
+                    await page.keyboard.type(code, { delay: 50 })
+                    const currentVal = await target.inputValue().catch(() => undefined)
+                    if (currentVal !== undefined && !currentVal) {
+                        await target.fill(code).catch(() => {})
+                    }
+                } else {
+                    await target.fill(code)
+                }
+                await this.bot.utils.wait(500)
+                await this.submitCodeFormIfStillVisible(page)
+                this.bot.logger.info(this.bot.isMobile, 'LOGIN-CODE', 'Filled code input')
+                return true
+            }
+
             const visibleInput = await page
                 .waitForSelector(this.textInputSelector, { state: 'visible', timeout: 500 })
                 .catch(() => null)
 
             if (visibleInput) {
+                await visibleInput.click?.().catch(() => {})
                 await page.keyboard.type(code, { delay: 50 })
-                const stilOnPage = await page
-                    .waitForSelector(this.textInputSelector, { state: 'visible', timeout: 750 })
-                    .then(() => true)
-                    .catch(() => false)
-                if (stilOnPage) {
-                    await page.keyboard.press('Enter')
-                }
+                await this.bot.utils.wait(500)
+                await this.submitCodeFormIfStillVisible(page)
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN-CODE', 'Filled code input')
                 return true
             }
 
             const secondairyInput = await page.$(this.secondairyInputSelector)
             if (secondairyInput) {
+                await secondairyInput.click?.().catch(() => {})
                 await page.keyboard.type(code, { delay: 50 })
-
-                const stilOnPage = await page
-                    .waitForSelector(this.secondairyInputSelector, { state: 'visible', timeout: 750 })
-                    .then(() => true)
-                    .catch(() => false)
-                if (stilOnPage) {
-                    await page.keyboard.press('Enter')
-                }
-
+                await this.bot.utils.wait(500)
+                await this.submitCodeFormIfStillVisible(page)
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN-CODE', 'Filled code input')
                 return true
             }
@@ -69,6 +170,21 @@ export class CodeLogin {
             )
             return false
         }
+    }
+
+    async submitCode(page: Page, code: string): Promise<{ ok: boolean; error?: string }> {
+        const filled = await this.fillCode(page, code)
+        if (!filled) {
+            return { ok: false, error: 'Code input field not found' }
+        }
+
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+        const errorMessage = await getErrorMessage(page)
+        if (errorMessage) {
+            return { ok: false, error: errorMessage }
+        }
+
+        return { ok: true }
     }
 
     private async fillEmail(page: Page, email: string): Promise<boolean> {

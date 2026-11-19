@@ -146,8 +146,9 @@ Authentication methods live under `src/browser/auth/methods/`:
 - `EmailLogin` and password flow submit the primary credentials.
 - `PasswordlessLogin` approves the displayed app number with a bounded timeout and retry.
 - `Totp2FA` generates OTPAuth codes or requests interactive input.
-- `GetACodeLogin` handles email-code entry.
-- `RecoveryEmailLogin` handles recovery addresses/codes.
+- `GetACodeLogin` handles email-code entry (including single-box and 6-box inputs via `submitCode`).
+- `RecoveryEmailLogin` handles recovery addresses (`input#proof-confirmation-email-input` and `[data-testid="proof-confirmation"]`).
+- `FviaInboxesMail` fetches Microsoft single-use and recovery verification codes directly from `fviainboxes.com` without proxy/secret logging. Only when `account.recoveryEmail` strictly has domain `@fviainboxes.com`, the auth state machine prefers email-code sign-in before password (on method picker, send-code banner, and switching away from password entry when available), permits passing through `EMAIL_VERIFICATION_INPUT` / `RECOVERY_EMAIL_INPUT` / `OTP_CODE_ENTRY` under `NormalSession`, and falls back to `account.password` or a `verification` hold if auto-retrieval fails. Non-`@fviainboxes.com` accounts retain `password > authenticator > email-code` priority and immediate `NormalSession` verification holds.
 - `MobileAccessLogin` obtains the app OAuth token through the browser/request path. Explicit app-auth challenges emit a redacted `LOGIN-APP` user-action reason; Smart blocks only the three incomplete app workers for that account/day, without treating web login/search as failed. See [app authorization recovery](../../../docs/APP_AUTHORIZATION_VI.md).
 
 Login checks the Rewards earn page first when the browser already has authentication cookies; fresh sessions retain the explicit login route. An unrecognized Rewards `/auth/login` page gets one earn-page recovery, and the auth route or tracking cookies alone cannot establish login success.

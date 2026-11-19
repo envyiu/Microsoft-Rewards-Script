@@ -51,6 +51,9 @@ export const LOGIN_SELECTORS = {
     totpInputOld: 'form[name="OneTimeCodeViewForm"]',
     identityBanner: '[data-testid="identityBanner"]',
     otpCodeEntry: '[data-testid="codeEntry"]',
+    otpCodeInput:
+        '[data-testid="codeEntry"] input, [data-testid="codeInputWrapper"] input, input[id="otc-confirmation-input"], input[name="otc"]',
+    passwordSwitchToCode: '#otcLoginLink, #idA_PWD_SwitchToOTC, #idA_PWD_SwitchToCredPicker',
     backButton: '#back-button',
     bingProfile: '#id_n',
     microsoftAccountProfile:
@@ -83,6 +86,15 @@ export function classifySignInMethod(option: SignInMethodOption): SignInMethodTy
         )
     ) {
         return 'AUTHENTICATOR'
+    }
+
+    if (
+        !/\b(?:sms|text\s+message|phone\s+call|tin\s+nhắn)\b/i.test(option.label) &&
+        (/\b(?:email\s+(?:a\s+)?code|send\s+(?:a\s+)?code\s+to)\b/i.test(option.label) ||
+            /(?:gửi\s+mã\s+(?:đến|qua)|nhận\s+mã\s+qua\s+email)/i.test(option.label) ||
+            (option.label.includes('@') && /(?:code|mã)/i.test(option.label)))
+    ) {
+        return 'EMAIL'
     }
 
     return 'UNKNOWN'
