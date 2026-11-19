@@ -166,15 +166,19 @@ function rawMessageId(item: Record<string, unknown>): string | undefined {
     return undefined
 }
 
-function cleanHtmlBody(body: string): string {
-    if (!body.includes('<') || !body.includes('>')) return body
-    return body
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+function cleanMailBody(body: string): string {
+    let cleaned = body
+    if (cleaned.includes('<') && cleaned.includes('>')) {
+        cleaned = cleaned
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&#?[a-zA-Z0-9]+;/g, ' ')
+    }
+    return cleaned
         .replace(/https?:\/\/[^\s<>"']+/gi, ' ')
+        .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, ' ')
         .replace(/#[0-9a-fA-F]{6}\b/g, ' ')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/&#?[a-zA-Z0-9]+;/g, ' ')
 }
 
 export function extractMicrosoftVerificationCode(
@@ -233,7 +237,7 @@ export function extractMicrosoftVerificationCode(
         const normalizedCombined = normalizeMailText(`${subject} ${body}`)
         if (!VERIFICATION_KEYWORDS.some(keyword => normalizedCombined.includes(keyword))) continue
 
-        const cleanBody = cleanHtmlBody(body)
+        const cleanBody = cleanMailBody(body)
         const textContent = `${subject} ${cleanBody}`
         const codes = new Set(textContent.match(/(?<!\d)\d{6,8}(?!\d)/g) ?? [])
         if (codes.size === 1) {

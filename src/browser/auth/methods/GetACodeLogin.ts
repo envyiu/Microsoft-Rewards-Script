@@ -4,10 +4,12 @@ import { canPromptForInput, getErrorMessage, getSubtitleMessage, promptInput } f
 
 export class CodeLogin {
     private readonly textInputSelector = '[data-testid="codeInputWrapper"]'
-    private readonly secondairyInputSelector = 'input[id="otc-confirmation-input"], input[name="otc"]'
+    private readonly secondairyInputSelector =
+        'input[id="otc-confirmation-input"], input[name="otc"], input#iOttText, input[name="iOttText"]'
     private readonly otpInputsSelector =
-        '[data-testid="codeEntry"] input, [data-testid="codeInputWrapper"] input, input[id="otc-confirmation-input"], input[name="otc"]'
-    private readonly submitButtonSelector = 'button[data-testid="primaryButton"], button[type="submit"]'
+        '[data-testid="codeEntry"] input, [data-testid="codeInputWrapper"] input, input[id="otc-confirmation-input"], input[name="otc"], input#iOttText, input[name="iOttText"]'
+    private readonly submitButtonSelector =
+        'button[data-testid="primaryButton"], button[type="submit"], input[type="submit"], #iVerifyCodeAction, #iNext'
     private readonly emailVerificationInputSelectors = [
         'input#proof-confirmation-email-input',
         '[data-testid="proof-confirmation"]'
@@ -106,9 +108,10 @@ export class CodeLogin {
                     const box = visibleInputs[i]
                     const char = code[i]
                     if (!box || !char) continue
-                    const currentVal = await box.inputValue().catch(() => undefined)
+                    const currentVal = await box.inputValue({ timeout: 300 }).catch(() => undefined)
+                    if (currentVal === undefined) break
                     if (currentVal !== char) {
-                        await box.fill(char).catch(() => {})
+                        await box.fill(char, { timeout: 500 }).catch(() => {})
                     }
                 }
                 await this.bot.utils.wait(500)
@@ -124,9 +127,9 @@ export class CodeLogin {
                 await target.fill('').catch(() => {})
                 if (typeof page.keyboard?.type === 'function') {
                     await page.keyboard.type(code, { delay: 50 })
-                    const currentVal = await target.inputValue().catch(() => undefined)
+                    const currentVal = await target.inputValue({ timeout: 300 }).catch(() => undefined)
                     if (currentVal !== undefined && !currentVal) {
-                        await target.fill(code).catch(() => {})
+                        await target.fill(code, { timeout: 500 }).catch(() => {})
                     }
                 } else {
                     await target.fill(code)
@@ -178,6 +181,7 @@ export class CodeLogin {
             return { ok: false, error: 'Code input field not found' }
         }
 
+        await this.bot.utils.wait(500)
         await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
         const errorMessage = await getErrorMessage(page)
         if (errorMessage) {

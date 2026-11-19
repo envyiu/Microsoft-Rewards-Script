@@ -5,9 +5,12 @@ import { canPromptForInput, getErrorMessage, promptInput } from './LoginUtils'
 export class RecoveryLogin {
     private readonly emailInputSelectors = [
         'input#proof-confirmation-email-input',
-        '[data-testid="proof-confirmation"]'
+        '[data-testid="proof-confirmation"]',
+        'input#iProofEmail',
+        'input[name="iProofEmail"]'
     ] as const
-    private readonly submitButtonSelector = 'button[data-testid="primaryButton"], button[type="submit"]'
+    private readonly submitButtonSelector =
+        'button[data-testid="primaryButton"], button[type="submit"], input[type="submit"], #iSelectProofAction, #iNext'
     private readonly textInputSelector = '[data-testid="proof-confirmation"]'
     private readonly maxManualSeconds = 60
     private readonly maxManualAttempts = 5
@@ -43,7 +46,7 @@ export class RecoveryLogin {
                 : false
             if (ghostClicked) return
             if (typeof submitVisible.click === 'function') {
-                await submitVisible.click().catch(() => {})
+                await submitVisible.click({ timeout: 1000 }).catch(() => {})
                 return
             }
         }

@@ -71,28 +71,36 @@ function createFakeAuthPage(initialScreen, transitions) {
             return screen.primaryButton ? [screen.primaryButton] : []
         if (selector === '#back-button') return screen.backButton ? [screen.backButton] : []
         if (selector === 'div[role="alert"]') return screen.alert ? [{ text: screen.alert }] : []
-        if (selector === '[data-testid="subtitle"], div#oneTimeCodeDescription, [data-testid="description"]') {
+        if (selector.includes('[data-testid="subtitle"]')) {
             return screen.subtitle ? [{ text: screen.subtitle }] : []
         }
         if (
             selector === 'input#proof-confirmation-email-input' ||
+            selector === 'input#proof-confirmation-email-input, input#iProofEmail, input[name="iProofEmail"]' ||
             selector === '[data-testid="proof-confirmation"]' ||
             selector === 'input#proof-confirmation-email-input input' ||
-            selector === '[data-testid="proof-confirmation"] input'
+            selector === '[data-testid="proof-confirmation"] input' ||
+            selector === 'input#iProofEmail' ||
+            selector === 'input[name="iProofEmail"]'
         ) {
             return screen.recoverySelector === selector ||
-                (selector === 'input#proof-confirmation-email-input' && screen.recoveryMode === 'emailVerification') ||
+                (screen.recoverySelector === 'input#iProofEmail' && selector.includes('input#iProofEmail')) ||
+                (selector.includes('input#proof-confirmation-email-input') &&
+                    screen.recoveryMode === 'emailVerification') ||
                 (selector === '[data-testid="proof-confirmation"]' && screen.recoveryMode === 'recovery')
                 ? [{ id: 'recovery' }]
                 : []
         }
-        if (
-            selector ===
-            '[data-testid="codeEntry"] input, [data-testid="codeInputWrapper"] input, input[id="otc-confirmation-input"], input[name="otc"]'
-        ) {
+        if (selector.includes('[data-testid="codeEntry"] input')) {
+            if (screen.classicOtp && !selector.includes('input#iOttText')) return []
             return screen.otpBoxes ? Array.from({ length: screen.otpBoxes }, (_, idx) => ({ idx })) : []
         }
-        if (selector === '[data-testid="codeEntry"]' || selector === 'div[data-testid="codeEntry"]') {
+        if (
+            selector === '[data-testid="codeEntry"]' ||
+            selector === 'div[data-testid="codeEntry"]' ||
+            selector.startsWith('[data-testid="codeEntry"],')
+        ) {
+            if (screen.classicOtp && !selector.includes('input#iOttText')) return []
             return screen.otpBoxes ? [{ text: 'otp' }] : []
         }
         if (selector === '[data-testid="passwordEntry"]') return screen.password ? [{ id: 'password' }] : []
@@ -101,7 +109,7 @@ function createFakeAuthPage(initialScreen, transitions) {
             return screen.email ? [{ id: 'email' }] : []
         }
         if (selector === 'button[type="submit"]') return screen.submitButton ? [{ text: 'Next' }] : []
-        if (selector === 'button[data-testid="primaryButton"], button[type="submit"]') {
+        if (selector.startsWith('button[data-testid="primaryButton"], button[type="submit"]')) {
             return screen.primaryButton ? [screen.primaryButton] : screen.submitButton ? [{ text: 'Next' }] : []
         }
         if (selector === '[data-testid="identityBanner"]') return screen.identityBanner ? [{ text: 'user' }] : []
@@ -807,7 +815,7 @@ test('falls back cleanly to password on fviainboxes timeout and resolves post-pa
         },
         $: async () => null,
         locator: sel => {
-            if (sel === '[data-testid="subtitle"], div#oneTimeCodeDescription, [data-testid="description"]') {
+            if (sel.includes('[data-testid="subtitle"]')) {
                 return {
                     first: () => ({
                         isVisible: async () => currentStage !== 'PASSWORD_INPUT',
@@ -815,10 +823,7 @@ test('falls back cleanly to password on fviainboxes timeout and resolves post-pa
                     })
                 }
             }
-            if (
-                sel ===
-                '[data-testid="codeEntry"] input, [data-testid="codeInputWrapper"] input, input[id="otc-confirmation-input"], input[name="otc"]'
-            ) {
+            if (sel.includes('[data-testid="codeEntry"] input')) {
                 return {
                     count: async () => (currentStage === 'OTP_CODE_ENTRY' ? 6 : 0),
                     nth: () => ({
@@ -920,10 +925,7 @@ test('NormalSession permits fviainboxes recovery/OTP completion and enforces ver
         },
         $: async () => null,
         locator: sel => {
-            if (
-                sel ===
-                '[data-testid="codeEntry"] input, [data-testid="codeInputWrapper"] input, input[id="otc-confirmation-input"], input[name="otc"]'
-            ) {
+            if (sel.includes('[data-testid="codeEntry"] input')) {
                 return {
                     count: async () => (stage === 'OTP_CODE_ENTRY' ? 1 : 0),
                     nth: () => ({
@@ -994,4 +996,120 @@ test('NormalSession permits fviainboxes recovery/OTP completion and enforces ver
         { code: 'ACCOUNT_SESSION_STOPPED' }
     )
     assert.equal(legacySession.failureReason(), 'verification')
+})
+
+test('plain-text Microsoft single-use code emails strip fwlink URLs and numeric email addresses', () => {
+    const address = 'user123456@fviainboxes.com'
+    const sinceMs = Date.parse('2026-11-20T01:00:00Z')
+    const payload = {
+        result: [
+            {
+                id: 'plain-real-1',
+                from: 'account-security-noreply@accountprotection.microsoft.com',
+                createdAt: Math.floor((sinceMs + 5000) / 1000),
+                subject: 'Your single-use code',
+                text: `Hi ${address},\r\n\r\nWe received your request for a single-use code to use with your Microsoft account.\r\n\r\nYour single-use code is: 482910\r\n\r\nThanks,\r\nThe Microsoft account team\r\nPrivacy Statement: https://go.microsoft.com/fwlink/?LinkId=521839\r\nMicrosoft Corporation, One Microsoft Way, Redmond, WA 98052`
+            }
+        ]
+    }
+    assert.deepEqual(extractMicrosoftVerificationCode(payload, { address, sinceMs }), {
+        code: '482910',
+        messageId: 'plain-real-1'
+    })
+})
+
+test('6-box auto-submit stops verification without fill() if boxes detach and escapeOtpCodeEntry clears passwordless flag on PASSWORD_INPUT', async () => {
+    const { bot } = createAuthFixture()
+    const login = new Login(bot)
+    let fillCalls = 0
+    let submitted = false
+
+    const autoSubmitPage = {
+        url: () => 'https://login.live.com/',
+        isClosed: () => false,
+        waitForSelector: async () => null,
+        waitForLoadState: async () => {},
+        locator: sel => {
+            if (sel.includes('[data-testid="codeEntry"] input')) {
+                return {
+                    count: async () => 6,
+                    nth: () => ({
+                        isVisible: async () => true,
+                        click: async () => {},
+                        inputValue: async () => {
+                            if (submitted) throw new Error('detached after auto-submit')
+                            return ''
+                        },
+                        fill: async () => {
+                            fillCalls++
+                        }
+                    })
+                }
+            }
+            return { count: async () => 0, first: () => ({ isVisible: async () => false }) }
+        },
+        keyboard: {
+            type: async () => {
+                submitted = true
+            },
+            press: async () => {}
+        }
+    }
+
+    const res = await login.codeLogin.submitCode(autoSubmitPage, '918273')
+    assert.deepEqual(res, { ok: true })
+    assert.equal(fillCalls, 0)
+
+    // Classic identity/confirm inputs (#iProofEmail and #iOttText) are recognized cleanly
+    const confirmEmailPage = createFakeAuthPage({
+        url: 'https://account.live.com/identity/confirm',
+        recoverySelector: 'input#iProofEmail',
+        subtitle: 'Enter full email to verify da***@fviainboxes.com'
+    })
+    await confirmEmailPage.goto('https://account.live.com/identity/confirm')
+    assert.equal(await login.detectCurrentState(confirmEmailPage), 'EMAIL_VERIFICATION_INPUT')
+
+    const confirmOtpPage = createFakeAuthPage({
+        url: 'https://account.live.com/identity/confirm',
+        classicOtp: true,
+        otpBoxes: 1
+    })
+    await confirmOtpPage.goto('https://account.live.com/identity/confirm')
+    assert.equal(await login.detectCurrentState(confirmOtpPage), 'OTP_CODE_ENTRY')
+
+    // Escaping OTP onto PASSWORD_INPUT (with identityBanner + primaryButton + passwordEntry) keeps passwordlessMethodSelected=false
+    const fallbackLogin = new Login(bot)
+    fallbackLogin.initAuthFlowState({ recoveryEmail: 'dattuan1x2y@fviainboxes.com' })
+    fallbackLogin.passwordlessMethodSelected = true
+    fallbackLogin.fviaFetchImpl = async () => jsonResponse({ result: [] })
+    fallbackLogin.fviaPollOptions = { timeoutMs: 15, pollIntervalMs: 5, sleep: async () => {} }
+
+    const pwLandingPage = createFakeAuthPage(
+        {
+            otpBoxes: 6,
+            subtitle: 'Enter code sent to da***@fviainboxes.com',
+            footerButtons: [{ id: 'other-ways-btn', text: 'Use your password instead' }]
+        },
+        event => {
+            if (event.type === 'click' && event.item?.id === 'other-ways-btn') {
+                return {
+                    screen: {
+                        identityBanner: true,
+                        password: true,
+                        primaryButton: { id: 'sign-in-btn', text: 'Sign in' }
+                    }
+                }
+            }
+            return null
+        }
+    )
+
+    const { handleOtpCodeEntry } = await import('../../dist/browser/auth/Totp2FaHandler.js')
+    const ok = await handleOtpCodeEntry(fallbackLogin, pwLandingPage, {
+        email: 'primary@outlook.com',
+        password: 'pw-value',
+        recoveryEmail: 'dattuan1x2y@fviainboxes.com'
+    })
+    assert.equal(ok, true)
+    assert.equal(fallbackLogin.passwordlessMethodSelected, false)
 })

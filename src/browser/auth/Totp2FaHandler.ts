@@ -401,10 +401,12 @@ async function escapeOtpCodeEntry(host: Login, page: Page): Promise<boolean> {
                     (await host.checkSelector(page, host.selectors.signInTile)) ||
                     (await host.checkSelector(page, host.selectors.passwordlessOptionOld)) ||
                     (await host.checkSelector(page, host.selectors.emailIconOld))
+                const passwordEntryVisible = await host.checkSelector(page, host.selectors.passwordEntry)
                 const passwordlessLandingVisible =
                     (await host.checkSelector(page, host.selectors.passwordlessCheck)) ||
                     (await host.checkSelector(page, host.selectors.passwordlessNumber)) ||
-                    ((await host.checkSelector(page, host.selectors.identityBanner)) &&
+                    (!passwordEntryVisible &&
+                        (await host.checkSelector(page, host.selectors.identityBanner)) &&
                         (await host.checkSelector(page, host.selectors.primaryButton)))
 
                 host.passwordlessMethodSelected = passwordlessLandingVisible
@@ -413,9 +415,11 @@ async function escapeOtpCodeEntry(host: Login, page: Page): Promise<boolean> {
                     'LOGIN',
                     methodPickerVisible
                         ? 'Returned to sign-in method selection'
-                        : passwordlessLandingVisible
-                          ? 'Switched to Microsoft Authenticator sign-in'
-                          : 'Switched away from email-code authentication'
+                        : passwordEntryVisible
+                          ? 'Switched to password sign-in'
+                          : passwordlessLandingVisible
+                            ? 'Switched to Microsoft Authenticator sign-in'
+                            : 'Switched away from email-code authentication'
                 )
                 return true
             }
