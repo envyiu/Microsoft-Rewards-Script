@@ -114,23 +114,25 @@ export async function detectCurrentState(host: Login, page: Page): Promise<Login
         [host.selectors.otpInput, 'OTP_CODE_ENTRY']
     ]
 
-    const [results, identityBanner, primaryButton, passwordEntry, footerAction, footerActionText] = await Promise.all([
-        Promise.all(
-            stateChecks.map(async ([sel, state]) => {
-                const visible = await host.checkSelector(page, sel)
-                return visible ? state : null
-            })
-        ),
-        host.checkSelector(page, host.selectors.identityBanner),
-        host.checkSelector(page, host.selectors.primaryButton),
-        host.checkSelector(page, host.selectors.passwordEntry),
-        host.checkSelector(page, host.selectors.footerAction),
-        page
-            .locator(host.selectors.footerAction)
-            .first()
-            .innerText({ timeout: 200 })
-            .catch(() => '')
-    ])
+    const [results, identityBanner, primaryButton, passwordEntry, footerAction, footerActionText, errorImage] =
+        await Promise.all([
+            Promise.all(
+                stateChecks.map(async ([sel, state]) => {
+                    const visible = await host.checkSelector(page, sel)
+                    return visible ? state : null
+                })
+            ),
+            host.checkSelector(page, host.selectors.identityBanner),
+            host.checkSelector(page, host.selectors.primaryButton),
+            host.checkSelector(page, host.selectors.passwordEntry),
+            host.checkSelector(page, host.selectors.footerAction),
+            page
+                .locator(host.selectors.footerAction)
+                .first()
+                .innerText({ timeout: 200 })
+                .catch(() => ''),
+            host.checkSelector(page, host.selectors.errorImage)
+        ])
 
     const visibleStates = results.filter((s): s is LoginState => s !== null)
     if (visibleStates.length > 0) {
@@ -190,6 +192,23 @@ export async function detectCurrentState(host: Login, page: Page): Promise<Login
             host.bot.logger.debug(host.bot.isMobile, 'DETECT-STATE', 'Primary passwordless action detected')
             results.push('PASSWORDLESS_SEND_CODE')
         }
+    } else if (
+        identityBanner &&
+        !primaryButton &&
+        footerAction &&
+        errorImage &&
+        !passwordEntry &&
+        !results.includes('2FA_TOTP') &&
+        !results.includes('RECOVERY_EMAIL_INPUT') &&
+        !results.includes('EMAIL_VERIFICATION_INPUT') &&
+        !results.includes('OTP_CODE_ENTRY')
+    ) {
+        host.bot.logger.debug(
+            host.bot.isMobile,
+            'DETECT-STATE',
+            'Sign-in method error screen with footer alternative detected'
+        )
+        results.push('FOOTER_ACTION')
     }
 
     let foundStates = results.filter((s): s is LoginState => s !== null)
@@ -359,6 +378,23 @@ export async function handleLoginState(host: Login, state: LoginState, page: Pag
         }
 
         case 'FOOTER_ACTION': {
+            const onMethodErrorScreen =
+                typeof page.locator === 'function'
+                    ? await page
+                          .locator(host.selectors.errorImage)
+                          .first()
+                          .isVisible()
+                          .catch(() => false)
+                    : false
+            if (onMethodErrorScreen) {
+                host.bot.logger.warn(
+                    host.bot.isMobile,
+                    'LOGIN',
+                    'Sign-in method limit/error screen detected; disabling email-code preference and trying alternative method'
+                )
+                host.fviaAutoCodeFailed = true
+                host.preferEmailCodeOverPassword = false
+            }
             host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Opening alternative sign-in methods')
             const clicked = await host.bot.browser.utils.ghostClick(page, host.selectors.footerAction)
             if (!clicked) {

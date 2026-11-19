@@ -113,6 +113,7 @@ function createFakeAuthPage(initialScreen, transitions) {
             return screen.primaryButton ? [screen.primaryButton] : screen.submitButton ? [{ text: 'Next' }] : []
         }
         if (selector === '[data-testid="identityBanner"]') return screen.identityBanner ? [{ text: 'user' }] : []
+        if (selector === '[data-testid="errorImage"]') return screen.errorImage ? [{ id: 'error-img' }] : []
         if (selector === 'img[data-testid="accessibleImg"][src*="picker_verify_email"]') {
             return screen.emailIconOld ? [{}] : []
         }
@@ -1112,4 +1113,51 @@ test('6-box auto-submit stops verification without fill() if boxes detach and es
     })
     assert.equal(ok, true)
     assert.equal(fallbackLogin.passwordlessMethodSelected, false)
+})
+
+test('handles Microsoft sign-in method limit screen (errorImage without primaryButton) via footer action password fallback', async () => {
+    const { bot } = createAuthFixture()
+    const login = new Login(bot)
+    let enteredPassword = null
+    login.emailLogin.enterPassword = async (_page, pw) => {
+        enteredPassword = pw
+        return 'ok'
+    }
+    login.finalizeLogin = async () => {}
+
+    const page = createFakeAuthPage(
+        {
+            identityBanner: true,
+            errorImage: true,
+            footerButtons: [{ id: 'use-pwd-btn', text: 'Use your password' }]
+        },
+        event => {
+            if (event.type === 'click' && event.item?.id === 'use-pwd-btn') {
+                return {
+                    screen: {
+                        identityBanner: true,
+                        password: true,
+                        submitButton: true
+                    }
+                }
+            }
+            return null
+        }
+    )
+
+    assert.equal(await login.detectCurrentState(page), 'FOOTER_ACTION')
+
+    const origDetect = login.detectCurrentState.bind(login)
+    login.detectCurrentState = async p => (enteredPassword ? 'LOGGED_IN' : origDetect(p))
+
+    await login.login(page, {
+        email: 'primary@outlook.com',
+        password: 'pw-value',
+        recoveryEmail: 'mendozanicole8971ypk@fviainboxes.com'
+    })
+
+    assert.equal(login.fviaAutoCodeFailed, true)
+    assert.equal(login.preferEmailCodeOverPassword, false)
+    assert.equal(enteredPassword, 'pw-value')
+    assert.ok(page.clicks.includes('use-pwd-btn'))
 })

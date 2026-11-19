@@ -40,6 +40,7 @@ export const LOGIN_SELECTORS = {
     emailVerificationInput: 'input#proof-confirmation-email-input, input#iProofEmail, input[name="iProofEmail"]',
     accountLocked: '#serviceAbuseLandingTitle',
     errorAlert: 'div[role="alert"]',
+    errorImage: '[data-testid="errorImage"]',
     passwordEntry: '[data-testid="passwordEntry"]',
     emailEntry: 'input#usernameEntry',
     kmsiVideo: '[data-testid="kmsiVideo"]',
