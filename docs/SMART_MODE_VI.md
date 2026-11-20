@@ -9,7 +9,7 @@ Giả sử một worker có 8 acc, được cấu hình 3 luồng. Acc A và B d
 1. Scheduler xem từng acc còn thiếu Daily Set, nhiệm vụ khác hoặc search nào.
 2. Mỗi phần việc được chuyển thành một **job**, có thời điểm được chạy sớm nhất.
 3. Khi có chỗ trống, scheduler chọn tối đa 3 job đủ điều kiện, ưu tiên việc quan trọng trước.
-4. A đang chạy thì B phải chờ vì cùng nhóm proxy. C và D vẫn có thể chạy.
+4. A đang chạy thì B phải chờ vì cùng nhóm proxy. Sau khi A kết thúc, nhóm proxy nghỉ ngẫu nhiên 5–20 phút trước khi acc khác chạy. C và D vẫn có thể chạy.
 5. Một job kết thúc thì ghi kết quả, giải phóng chỗ, cập nhật hàng đợi và chọn việc tiếp theo.
 6. Acc chưa xong mục tiêu chỉ quay lại sau ít nhất 90 phút từ lúc phiên trước kết thúc và khi còn lượt trong trần 4 phiên/24 giờ trượt. Chấp nhận acc chưa hoàn tất ngày.
 
@@ -224,3 +224,9 @@ Tài liệu này chỉ mô tả cơ chế. Việc tạo tài liệu không thay 
 ## Search theo daily Rewards streak
 
 Khi `streakSearchV1` bật, quota search thường mỗi ngày tính theo `30 + 2 × min(streak, 30)` phần trăm; desktop tối đa cơ sở 30 query và mobile 20, làm tròn xuống. Streak 0 cho 9/6, streak 10 cho 15/10, streak từ 30 cho 27/18. Dùng lần đọc Rewards thành công gần nhất, chưa có thì tạm dùng 0; đọc mới cập nhật các lượt tiếp theo. Số đã sử dụng và reservation chưa chắc chắn được giữ khi thay mục tiêu, restart hay handoff. Search và query từ quest vẫn dùng chung trần mỗi phiên, tối đa 5. Các khoảng search cũ chỉ còn để đọc cấu hình tương thích, không quyết định quota khi chính sách này bật. Worker phải công bố capability `streakSearchV1` trước khi Manager gửi chính sách mới.
+
+## Nghỉ khi đổi acc cùng proxy
+
+Sau mỗi phiên Smart đã mở tiến trình (Rewards, warmup hoặc nhánh tương thích), Worker chọn một lần thời gian nghỉ nguyên phút trong khoảng 5–20 và lưu `proxyCooldown` vào planner của acc vừa kết thúc. Mốc tuyệt đối giữ qua restart, đổi ngày và handoff planner; không bốc lại khi replan/Retry. Tiến trình cũ được xác nhận đã chết khi recovery sẽ bắt đầu khoảng nghỉ từ lúc recovery. Lỗi chưa tạo được tiến trình không tạo khoảng nghỉ.
+
+Acc khác có cùng nhóm proxy phải chờ tới `retryAt`; Request run, Run next và Urgent không bỏ qua khóa này. Acc cùng proxy vẫn không được chạy song song. Direct không nhận khoảng nghỉ proxy; thời gian nghỉ 90 phút của chính acc, quota và khóa đăng nhập vẫn giữ nguyên. Phiên thủ công tiếp tục dùng khóa acc hiện có và không tự bị đóng. API hiển thị `PROXY_COOLDOWN` và thời điểm được chạy tiếp. Các worker vận hành độc lập; quy tắc này không tạo bộ khóa proxy phân tán giữa các node nếu quản trị viên cố tình chia cùng proxy sang nhiều máy.

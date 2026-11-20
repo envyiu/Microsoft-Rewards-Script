@@ -32,7 +32,7 @@ test('Local Stop enforces permissions and reports an unconfirmed save after forc
     assert.equal(after.smart.sessions[0].exit.signal, 'SIGKILL')
 })
 
-test('paused Control API queues targeted starts without bypassing protection', async t => {
+test('paused Control API starts explicit targeted requests without enabling recurring work or refunding history', async t => {
     const local = await fixture(t, { ACCOUNT_1_EMAIL: 'protected@example.test' })
     const first = await local.request('/start', 'POST', { accountIndex: 1 })
     assert.equal(first.status, 202)
@@ -45,10 +45,11 @@ test('paused Control API queues targeted starts without bypassing protection', a
     for (const route of ['/start', '/restart']) {
         const response = await local.request(route, 'POST', { accountIndex: 1 })
         assert.equal(response.status, 202)
-        assert.equal(response.data.running.length, 0)
+        assert.equal(response.data.running.length, 1)
+        await local.request('/smart-schedule/accounts/1/stop', 'POST', { jobId: response.data.running[0].executionId })
     }
     const status = (await local.request('/smart-schedule')).data
     assert.equal(status.config.enabled, false)
     assert.equal(status.running.length, 0)
-    assert.equal(status.accounts[1].protection.sessions.length, 1)
+    assert.equal(status.accounts[1].protection.sessions.length, 3)
 })

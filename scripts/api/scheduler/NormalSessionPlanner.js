@@ -158,6 +158,19 @@ export const normalPlannerMethods = {
         }
         const account = this._cachedAccounts().find(a => a.index === numericIndex)
         const group = account && deriveNetworkGroup(account, this.document.config.networkGroupOverride)
+        const proxyUntil = group && this._proxyCooldownUntil(group, numericIndex, now)
+        if (proxyUntil) {
+            status.blockers.push({
+                code: 'PROXY_COOLDOWN',
+                scope: 'network',
+                source: 'proxy-rest',
+                retryAt: new Date(proxyUntil).toISOString()
+            })
+            if (!status.blockedReason || (status.nextEligibleAt && proxyUntil > Date.parse(status.nextEligibleAt))) {
+                status.blockedReason = 'PROXY_COOLDOWN'
+                status.nextEligibleAt = new Date(proxyUntil).toISOString()
+            }
+        }
         if (group && runningValues.some(r => r.job.accountIndex !== numericIndex && r.job.networkGroup === group)) {
             status.blockers.push({ code: 'PROXY_BUSY', scope: 'network', source: 'running', retryAt: null })
         }

@@ -203,7 +203,7 @@ export const scheduleStoreMethods = {
     },
 
     _recoverNormalSessions() {
-        for (const state of Object.values(this.document.state.accounts)) {
+        for (const [index, state] of Object.entries(this.document.state.accounts)) {
             for (const session of state.protection?.sessions || []) {
                 if (session.endedAt || !session.pid) continue
                 try {
@@ -230,6 +230,7 @@ export const scheduleStoreMethods = {
                     failure = JSON.parse(fs.readFileSync(file + '.outcome', 'utf8')).failure || failure
                 } catch {}
                 recordSessionOutcome(state, session.id, failure)
+                this._recordProxyCooldown({ accountIndex: Number(index) })
             }
         }
     },
@@ -248,6 +249,7 @@ export const scheduleStoreMethods = {
             const lastStoppedJobId = state?.lastStoppedJobId
             state = {
                 protection: state?.protection,
+                proxyCooldown: state?.proxyCooldown,
                 normalPolicyStatus: state?.normalPolicyStatus,
                 newAccount: state?.newAccount
                     ? {

@@ -1793,6 +1793,23 @@ test('Request run waits for a busy network and keeps its rest bypass through a s
     assert.equal(scheduler.document.state.accounts[account.index].protection.sessions.length, 1)
 })
 
+test('shared proxy rest survives local midnight with the account planner', t => {
+    const { scheduler, account } = planningFixture(t, {}, '2026-11-21T16:59:00Z')
+    scheduler._drain = () => {}
+    account.proxy = { url: 'socks5://midnight.test', port: 1234 }
+    scheduler._cachedAccounts = () => [account]
+    scheduler.replan()
+    const before = scheduler.document.state.accounts[account.index]
+    scheduler._recordProxyCooldown({ accountIndex: account.index })
+    const rest = structuredClone(before.proxyCooldown)
+    t.mock.timers.tick(2 * 60_000)
+    scheduler.replan()
+    const after = scheduler.document.state.accounts[account.index]
+    assert.notEqual(after.day, before.day)
+    assert.deepEqual(after.proxyCooldown, rest)
+    assert.equal(scheduler._proxyCooldownUntil(rest.networkGroup, account.index + 1), Date.parse(rest.until))
+})
+
 test('manual Run next skips rest once without refunding history or leaving a future override', t => {
     const { scheduler, account, started } = planningFixture(t)
     scheduler.document.config.normalPolicy.enabled = true

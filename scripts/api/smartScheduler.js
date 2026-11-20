@@ -13,6 +13,7 @@ import {
     shouldPlanSearch
 } from './scheduler/LegacyPlanner.js'
 import { normalPlannerMethods } from './scheduler/NormalSessionPlanner.js'
+import { proxyCooldownMethods } from './scheduler/ProxyCooldown.js'
 import {
     applyEarnScan,
     earnRecheckDue,
@@ -85,6 +86,7 @@ export class SmartScheduler extends EventEmitter {
 Object.assign(
     SmartScheduler.prototype,
     scheduleStoreMethods,
+    proxyCooldownMethods,
     warmupMethods,
     normalPlannerMethods,
     legacyPlannerMethods,

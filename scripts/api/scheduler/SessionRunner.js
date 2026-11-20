@@ -76,6 +76,7 @@ export const sessionRunnerMethods = {
             )
         const jobs = selectRunnableJobs(
             candidates.filter(job => {
+                if (this._proxyCooldownUntil(job.networkGroup, job.accountIndex)) return false
                 if (this.document.config.normalPolicy?.enabled && job.type !== 'warmup') {
                     if (job.type !== 'accountSession') return false
                     const state = this.document.state.accounts[String(job.accountIndex)]
@@ -107,6 +108,7 @@ export const sessionRunnerMethods = {
 
     _start(job, learningCandidates) {
         if (this.maintenance) return
+        if (this._proxyCooldownUntil(job.networkGroup, job.accountIndex)) return
         const accountState = this.document.state.accounts[String(job.accountIndex)]
         if (this.document.config.normalPolicy?.enabled && job.type !== 'warmup' && job.type !== 'accountSession') return
         if (job.type === 'accountSession') {
@@ -422,6 +424,7 @@ export const sessionRunnerMethods = {
                 },
                 trustedEnv: true
             })
+            record.spawned = Boolean(started.pid)
             if (normalSession) {
                 normalSession.pid = started.pid
                 normalSession.processIdentity = processIdentity(started.pid)
@@ -460,6 +463,9 @@ export const sessionRunnerMethods = {
 
     _finish(record, exit) {
         clearTimeout(record.timeout)
+        if (this.running.has(record.job.id) && (record.spawned || exit.code != null || exit.signal)) {
+            this._recordProxyCooldown(record.job)
+        }
         if (record.eventJournal && record.applyRuntimeEvent) {
             try {
                 if (fs.existsSync(record.eventJournal)) {

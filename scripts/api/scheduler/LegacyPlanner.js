@@ -411,6 +411,15 @@ export const legacyPlannerMethods = {
         const activeIds = new Set([...this.running.values()].map(item => item.job.id))
         this.queue = jobs
             .map(job => {
+                const until = this._proxyCooldownUntil(job.networkGroup, job.accountIndex)
+                if (!until) return job
+                return {
+                    ...job,
+                    dueAt: job.dueAt ? new Date(Math.max(Date.parse(job.dueAt), until)).toISOString() : null,
+                    reason: 'PROXY_COOLDOWN'
+                }
+            })
+            .map(job => {
                 const until = this.document.state.accounts[String(job.accountIndex)]?.manualStopUntil
                 return until && Date.parse(until) > Date.now()
                     ? {

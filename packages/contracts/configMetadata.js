@@ -386,6 +386,7 @@ export const BLOCKER_REMEDIATIONS = {
     UPDATE_IN_PROGRESS: 'Worker node is installing or verifying a release update.',
     STOP_COOLDOWN: 'Manual Stop cooldown active; wait for cooldown or trigger an explicit immediate start.',
     PROXY_BUSY: 'Another account sharing this proxy/network group is currently running.',
+    PROXY_COOLDOWN: 'Shared proxy is resting for 5–20 minutes after another account session; wait until retryAt.',
     CAPACITY_BUSY: 'All parallel worker slots on this node are currently in use.',
     OUTSIDE_WINDOW: 'Current local time is outside configured run windows or inside quiet hours.',
     APP_AUTH_REQUIRED:
@@ -422,6 +423,9 @@ export function computeAccountAxes({
     now = Date.now()
 } = {}) {
     const rawBlockers = [...(state.normalPolicyStatus?.blockers || [])]
+    if (queuedJob?.reason === 'PROXY_COOLDOWN') {
+        rawBlockers.push({ code: 'PROXY_COOLDOWN', scope: 'network', source: 'proxy-rest', retryAt: queuedJob.dueAt })
+    }
     if (state.appAuthorization?.required) {
         rawBlockers.push({
             code: 'APP_AUTH_REQUIRED',
@@ -491,7 +495,7 @@ export function computeAccountAxes({
     ) {
         execution = 'held'
     } else if (
-        blockers.some(b => ['SESSION_REST', 'SESSION_LIMIT', 'STOP_COOLDOWN'].includes(b.code)) ||
+        blockers.some(b => ['SESSION_REST', 'SESSION_LIMIT', 'STOP_COOLDOWN', 'PROXY_COOLDOWN'].includes(b.code)) ||
         (queuedJob?.dueAt && Date.parse(queuedJob.dueAt) > now + 1000)
     ) {
         execution = 'resting'
