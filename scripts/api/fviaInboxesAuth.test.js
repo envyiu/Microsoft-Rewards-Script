@@ -16,6 +16,7 @@ const {
     pollFviaInboxesCode
 } = require(path.join(dist, 'browser/auth/methods/FviaInboxesMail.js'))
 const { Login } = require(path.join(dist, 'browser/auth/Login.js'))
+const { detectCurrentState, handleLoginState } = require(path.join(dist, 'browser/auth/AuthStateMachine.js'))
 const { NormalSession } = require(path.join(dist, 'util/NormalSession.js'))
 
 function jsonResponse(data, status = 200) {
@@ -112,6 +113,15 @@ function createFakeAuthPage(initialScreen, transitions) {
         if (selector.startsWith('button[data-testid="primaryButton"], button[type="submit"]')) {
             return screen.primaryButton ? [screen.primaryButton] : screen.submitButton ? [{ text: 'Next' }] : []
         }
+        if (selector === '#iLooksGood') return screen.looksGood ? [{ id: 'iLooksGood', text: 'Looks good' }] : []
+        if (selector === '#iRemindMeLater') {
+            return screen.remindMeLater ? [{ id: 'iRemindMeLater', text: 'Remind me later' }] : []
+        }
+        if (selector === '#iShowSkip') return screen.showSkip ? [{ id: 'iShowSkip', text: 'Skip for now' }] : []
+        if (selector === '#iCancel') return screen.cancel ? [{ id: 'iCancel', text: 'Cancel' }] : []
+        if (selector === 'button, input[type="submit"], input[type="button"], a[role="button"], [role="button"], a') {
+            return Array.isArray(screen.proofsButtons) ? screen.proofsButtons : []
+        }
         if (selector === '[data-testid="identityBanner"]') return screen.identityBanner ? [{ text: 'user' }] : []
         if (selector === '[data-testid="errorImage"]') return screen.errorImage ? [{ id: 'error-img' }] : []
         if (selector === 'img[data-testid="accessibleImg"][src*="picker_verify_email"]') {
@@ -141,6 +151,7 @@ function createFakeAuthPage(initialScreen, transitions) {
         return {
             isVisible: async () => Boolean(item),
             innerText: async () => item?.text || '',
+            getAttribute: async name => item?.attrs?.[name] ?? null,
             count: async () => (item ? 1 : 0),
             first: () => makeLocatorItem(selector, 0),
             evaluate: async fn => {
@@ -1160,4 +1171,102 @@ test('handles Microsoft sign-in method limit screen (errorImage without primaryB
     assert.equal(login.preferEmailCodeOverPassword, false)
     assert.equal(enteredPassword, 'pw-value')
     assert.ok(page.clicks.includes('use-pwd-btn'))
+})
+
+test('detectCurrentState recognizes account.live.com/proofs/remind as PROOFS_REMIND and ignores identity/confirm', async () => {
+    const { bot } = createAuthFixture()
+    const login = new Login(bot)
+
+    const remindPage = createFakeAuthPage({ looksGood: true }, () => undefined)
+    await remindPage.goto('https://account.live.com/proofs/remind?mkt=en-US&uiflavor=web')
+    assert.equal(await detectCurrentState(login, remindPage), 'PROOFS_REMIND')
+
+    const confirmPage = createFakeAuthPage({}, () => undefined)
+    await confirmPage.goto('https://account.live.com/identity/confirm?mkt=en-US')
+    assert.notEqual(await detectCurrentState(login, confirmPage), 'PROOFS_REMIND')
+})
+
+test('handleLoginState PROOFS_REMIND prefers #iLooksGood over #iRemindMeLater and never clicks Update', async () => {
+    const { bot, messages } = createAuthFixture()
+    const login = new Login(bot)
+    const page = createFakeAuthPage(
+        {
+            looksGood: true,
+            remindMeLater: true,
+            proofsButtons: [{ id: 'update-btn', text: 'Update' }]
+        },
+        () => undefined
+    )
+    await page.goto('https://account.live.com/proofs/remind')
+
+    const handled = await handleLoginState(login, 'PROOFS_REMIND', page, { email: 'user@outlook.com' })
+    assert.equal(handled, true)
+    assert.deepEqual(page.clicks, ['iLooksGood'])
+    assert.ok(messages.some(m => m.message.includes('Dismissed Microsoft security info reminder (proofs/remind)')))
+})
+
+test('handleLoginState PROOFS_REMIND falls back to #iRemindMeLater when #iLooksGood is absent', async () => {
+    const { bot } = createAuthFixture()
+    const login = new Login(bot)
+    const page = createFakeAuthPage(
+        {
+            remindMeLater: true,
+            proofsButtons: [{ id: 'update-btn', text: 'Update' }]
+        },
+        () => undefined
+    )
+    await page.goto('https://account.live.com/proofs/remind')
+
+    const handled = await handleLoginState(login, 'PROOFS_REMIND', page, { email: 'user@outlook.com' })
+    assert.equal(handled, true)
+    assert.deepEqual(page.clicks, ['iRemindMeLater'])
+})
+
+test('handleLoginState PROOFS_REMIND uses Fluent text allowlist and never clicks Update, Change, or Add', async () => {
+    const { bot } = createAuthFixture()
+    const login = new Login(bot)
+    const page = createFakeAuthPage(
+        {
+            proofsButtons: [
+                { id: 'update-btn', text: 'Update security info' },
+                { id: 'change-btn', text: 'Change' },
+                { id: 'add-btn', text: 'Add a new way to sign in' },
+                { id: 'later-btn', text: 'Remind me later' }
+            ]
+        },
+        () => undefined
+    )
+    await page.goto('https://account.live.com/proofs/remind')
+
+    const handled = await handleLoginState(login, 'PROOFS_REMIND', page, { email: 'user@outlook.com' })
+    assert.equal(handled, true)
+    assert.deepEqual(page.clicks, ['later-btn'])
+})
+
+test('handleLoginState PROOFS_REMIND reads value attribute for submit inputs and returns false if only Update exists', async () => {
+    const { bot } = createAuthFixture()
+    const login = new Login(bot)
+
+    const submitPage = createFakeAuthPage(
+        {
+            proofsButtons: [
+                { id: 'update-btn', text: 'Update' },
+                { id: 'looks-good-input', text: '', attrs: { value: 'Looks good' } }
+            ]
+        },
+        () => undefined
+    )
+    await submitPage.goto('https://account.live.com/proofs/remind')
+    assert.equal(await handleLoginState(login, 'PROOFS_REMIND', submitPage, { email: 'user@outlook.com' }), true)
+    assert.deepEqual(submitPage.clicks, ['looks-good-input'])
+
+    const updateOnlyPage = createFakeAuthPage(
+        {
+            proofsButtons: [{ id: 'update-btn', text: 'Update' }]
+        },
+        () => undefined
+    )
+    await updateOnlyPage.goto('https://account.live.com/proofs/remind')
+    assert.equal(await handleLoginState(login, 'PROOFS_REMIND', updateOnlyPage, { email: 'user@outlook.com' }), false)
+    assert.deepEqual(updateOnlyPage.clicks, [])
 })

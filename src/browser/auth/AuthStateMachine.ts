@@ -17,6 +17,92 @@ import {
     trySwitchPasswordToEmailCode
 } from './Totp2FaHandler'
 
+const PROOFS_REMIND_CONFIRM_TEXT = /^(?:looks\s+good!?|thông\s+tin\s+này\s+chính\s+xác|chính\s+xác)$/i
+const PROOFS_REMIND_SKIP_TEXT =
+    /^(?:remind\s+me\s+later|skip\s+for\s+now|no,?\s*thanks|not\s+now|nhắc\s+tôi\s+sau|bỏ\s+qua)$/i
+
+function isProofsRemindUrl(url: URL): boolean {
+    const hostname = url.hostname.toLowerCase()
+    const pathname = url.pathname.toLowerCase().replace(/\/+$/, '')
+    return hostname === 'account.live.com' && (pathname === '/proofs/remind' || pathname.startsWith('/proofs/remind/'))
+}
+
+async function handleProofsRemind(host: Login, page: Page): Promise<boolean> {
+    host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Handling Microsoft security info reminder (proofs/remind)')
+
+    const selectorCandidates = [
+        host.selectors.proofsRemindConfirm,
+        ...host.selectors.proofsRemindSkip.split(',').map(s => s.trim())
+    ]
+
+    for (const selector of selectorCandidates) {
+        const locator = page.locator(selector).first()
+        const visible = await locator.isVisible().catch(() => false)
+        if (!visible) continue
+
+        let clicked = await host.bot.browser.utils.ghostClick(page, selector)
+        if (!clicked) {
+            clicked = await locator
+                .click({ timeout: 2000 })
+                .then(() => true)
+                .catch(() => false)
+        }
+        if (clicked) {
+            await host.waitForIdle(page, 'after dismissing security info reminder')
+            host.bot.logger.info(
+                host.bot.isMobile,
+                'LOGIN',
+                `Dismissed Microsoft security info reminder (proofs/remind) via ${selector}`
+            )
+            return true
+        }
+    }
+
+    const candidates = page.locator(
+        'button, input[type="submit"], input[type="button"], a[role="button"], [role="button"], a'
+    )
+    const count = await candidates.count().catch(() => 0)
+    const buttons: Array<{ index: number; text: string }> = []
+
+    for (let i = 0; i < count; i++) {
+        const el = candidates.nth(i)
+        const visible = await el.isVisible().catch(() => false)
+        if (!visible) continue
+
+        const rawText = await el.innerText().catch(() => '')
+        const rawValue = await (el as { getAttribute?: (name: string) => Promise<string | null> })
+            .getAttribute?.('value')
+            ?.catch(() => null)
+        const normalized = normalizeSignInText(rawText || rawValue || '')
+        if (!normalized) continue
+        buttons.push({ index: i, text: normalized })
+    }
+
+    const match =
+        buttons.find(btn => PROOFS_REMIND_CONFIRM_TEXT.test(btn.text)) ||
+        buttons.find(btn => PROOFS_REMIND_SKIP_TEXT.test(btn.text))
+
+    if (match) {
+        const target = candidates.nth(match.index)
+        const clicked = await target
+            .click({ timeout: 2000 })
+            .then(() => true)
+            .catch(() => false)
+        if (clicked) {
+            await host.waitForIdle(page, 'after dismissing security info reminder')
+            host.bot.logger.info(
+                host.bot.isMobile,
+                'LOGIN',
+                `Dismissed Microsoft security info reminder (proofs/remind) via button "${match.text}"`
+            )
+            return true
+        }
+    }
+
+    host.bot.logger.warn(host.bot.isMobile, 'LOGIN', 'Could not find confirm or skip action on proofs/remind page')
+    return false
+}
+
 export async function detectCurrentState(host: Login, page: Page): Promise<LoginState> {
     await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {})
 
@@ -57,6 +143,15 @@ export async function detectCurrentState(host: Login, page: Page): Promise<Login
     if (isLocked) {
         host.bot.logger.debug(host.bot.isMobile, 'DETECT-STATE', 'Account locked selector found')
         return 'ACCOUNT_LOCKED'
+    }
+
+    if (isProofsRemindUrl(url)) {
+        host.bot.logger.info(
+            host.bot.isMobile,
+            'DETECT-STATE',
+            'Detected Microsoft security info reminder (proofs/remind)'
+        )
+        return 'PROOFS_REMIND'
     }
 
     const isRewardsAuthRoute = hostname === 'rewards.bing.com' && /^\/auth(?:\/|$)/i.test(url.pathname)
@@ -458,6 +553,9 @@ export async function handleLoginState(host: Login, state: LoginState, page: Pag
 
         case '2FA_TOTP':
             return handleTotp2Fa(host, page, account)
+
+        case 'PROOFS_REMIND':
+            return handleProofsRemind(host, page)
 
         case 'KMSI_PROMPT': {
             host.bot.logger.info(host.bot.isMobile, 'LOGIN', 'Accepting KMSI prompt')

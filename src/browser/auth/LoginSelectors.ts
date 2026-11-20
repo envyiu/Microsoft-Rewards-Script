@@ -17,6 +17,7 @@ export type LoginState =
     | 'LOGIN_PASSWORDLESS'
     | 'PASSWORDLESS_SEND_CODE'
     | 'OTP_CODE_ENTRY'
+    | 'PROOFS_REMIND'
     | 'UNKNOWN'
     | 'CHROMEWEBDATA_ERROR'
 
@@ -59,7 +60,9 @@ export const LOGIN_SELECTORS = {
     bingProfile: '#id_n',
     microsoftAccountProfile:
         '#mectrl_currentAccount_primary, [data-testid="account-card"], [data-testid="user-avatar"]',
-    otpInput: 'div[data-testid="codeEntry"]'
+    otpInput: 'div[data-testid="codeEntry"]',
+    proofsRemindConfirm: '#iLooksGood',
+    proofsRemindSkip: '#iRemindMeLater, #iShowSkip, #iCancel'
 } as const
 
 export type LoginSelectors = typeof LOGIN_SELECTORS
