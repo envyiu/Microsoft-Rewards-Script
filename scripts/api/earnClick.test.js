@@ -7,6 +7,8 @@ const load = file => require(path.join(process.env.MRS_TEST_DIST || path.resolve
 const { chromium } = require('patchright')
 const { clickEarnCards, earnClickDestination } = load('functions/activities/rewards/RenderedEarnActions.js')
 const { readEarnPage } = load('browser/parsers/EarnPageParser.js')
+const { isNonActionableBannerOfferId } = load('browser/parsers/RewardCardParser.js')
+const { mergeRenderedEarn } = load('browser/parsers/RenderedEarn.js')
 const { default: BrowserFunc } = load('browser/BrowserFunc.js')
 const { default: ReactFunc } = load('browser/ReactFunc.js')
 const { MorePromotions } = load('functions/activities/rewards/MorePromotions.js')
@@ -201,4 +203,95 @@ test('only explicit search execution plans enable piggyback Earn scans; warmup r
     assert.equal(bot.config.workers.doDesktopSearch, true)
     assert.throws(() => loadExecutionPlan(JSON.stringify({ ...plan, type: 'warmup', services: [] })), /recheck/)
     assert.throws(() => loadExecutionPlan(JSON.stringify({ ...plan, recheckEarn: 'true' })), /recheck/)
+})
+
+test('isNonActionableBannerOfferId matches banner tokens and rejects normal offers', () => {
+    for (const id of [
+        'WW_BICYearEndWallpaperNov26_Activation_Banner',
+        'WW_banner_wallpaper_free_trt1_v1_202610',
+        'banner_RAF_Search_And_Earn_Redirection',
+        'WW_VisualSearch_SummerJuly26_Activation_Banner'
+    ]) {
+        assert.equal(isNonActionableBannerOfferId(id), true, id)
+    }
+    for (const id of [
+        'ENstar_Rewards_DailyGlobalOffer_Evergreen_Friday',
+        'WW_Rewards_Campaign_Global_EU_Expansion_BingOffer1',
+        'video',
+        'puzzle',
+        null,
+        ''
+    ]) {
+        assert.equal(isNonActionableBannerOfferId(id), false, String(id))
+    }
+})
+
+test('clickEarnCards and mergeRenderedEarn skip Deck the walls activation banners with or without data-offerid', async () => {
+    const browser = await chromium.launch({ headless: true })
+    try {
+        const context = await browser.newContext()
+        const main = await context.newPage()
+        const clicked = []
+        let balance = 100
+        const done = new Set()
+        await context.route('https://www.bing.com/**', route =>
+            route.fulfill({ contentType: 'text/html', body: '<h1>Bing</h1>' })
+        )
+        await context.route('https://rewards.bing.com/**', async route => {
+            const url = new URL(route.request().url())
+            if (url.pathname === '/credit') {
+                const id = url.searchParams.get('id')
+                clicked.push(id)
+                done.add(id)
+                balance += id === 'puzzle' ? 5 : 500
+                return route.fulfill({ body: 'ok' })
+            }
+            const rscOffers = [
+                {
+                    offerId: 'WW_BICYearEndWallpaperNov26_Activation_Banner',
+                    title: 'Deck the walls fallback',
+                    destination: 'https://www.bing.com/wallpaper-banner',
+                    points: 500,
+                    hash: 'banner-hash',
+                    promotionType: 'urlreward'
+                },
+                {
+                    offerId: 'puzzle',
+                    title: 'Complete this puzzle',
+                    destination: 'https://www.bing.com/search?q=puzzle',
+                    points: 5,
+                    hash: 'puzzle-hash',
+                    promotionType: 'urlreward'
+                }
+            ]
+            const body = `<main><header><button aria-expanded="false"><p>${balance}</p></button></header><section id="moreactivities"><div id="cards">
+                <a data-offerid="WW_BICYearEndWallpaperNov26_Activation_Banner" href="https://www.bing.com/rewardsapp/wallpaper?mkt=en-US" target="_blank" onclick="fetch('/credit?id=banner-attr')"><h3>Deck the walls</h3><div class="rounded-cornerCircular"><p class="text-metadata">500</p></div></a>
+                <a href="https://www.bing.com/wallpaper-banner?ocid=123" target="_blank" onclick="fetch('/credit?id=banner-rsc')"><h3>Deck the walls fallback</h3><div class="rounded-cornerCircular"><p class="text-metadata">500</p></div></a>
+                <a data-offerid="puzzle" href="https://www.bing.com/search?q=puzzle" target="_blank" onclick="fetch('/credit?id=puzzle')"><h3>Complete this puzzle</h3><div class="rounded-cornerCircular ${done.has('puzzle') ? 'bg-statusSuccessRewardsBg' : ''}"><p class="text-metadata">5</p></div></a>
+            </div></section><script>self.__next_f.push([1,${JSON.stringify(JSON.stringify(rscOffers))}])</script></main>`
+            await route.fulfill({ contentType: 'text/html', body })
+        })
+        await main.goto('https://rewards.bing.com/earn')
+        const bot = {
+            logger: Object.fromEntries(['info', 'debug', 'warn', 'error'].map(level => [level, () => {}])),
+            config: { activities: { urlReward: true, searchOnBing: false }, skipNonPointTasks: true },
+            utils: { wait: async () => {}, randomDelay: () => 0 },
+            userData: { currentPoints: 100, gainedPoints: 0 },
+            newBrowserPage: () => context.newPage(),
+            browser: {}
+        }
+        bot.browser.react = new ReactFunc(bot)
+        bot.browser.func = Object.assign(Object.create(BrowserFunc.prototype), { bot, getActivePage: () => main })
+
+        const state = await clickEarnCards(bot)
+        assert.deepEqual(clicked, ['puzzle'])
+        assert.equal(state.complete, true)
+
+        const { cards } = await readEarnPage(main)
+        const snapshot = bot.browser.react.snapshotPage(await main.content())
+        const unmatched = mergeRenderedEarn(snapshot, cards, main.url())
+        assert.equal(unmatched, 0)
+    } finally {
+        await browser.close()
+    }
 })

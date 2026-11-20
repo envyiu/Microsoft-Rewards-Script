@@ -2,10 +2,12 @@ import type { Page } from 'patchright'
 import type { MicrosoftRewardsBot } from '../../../index'
 import { readEarnPage, EARN_TASK_CONTROLS } from '../../../browser/parsers/EarnPageParser'
 import {
+    isNonActionableBannerOfferId,
     normalizeCardText,
     normalizeRewardUrl,
     type RenderedRewardCard
 } from '../../../browser/parsers/RewardCardParser'
+import type { ParsedOffer } from '../../../browser/ReactFunc'
 import { learningQuery } from '../../../util/Learning'
 import { URLs } from '../../../constants/urls'
 import { waitForActivity } from '../../../util/ActivityTiming'
@@ -44,6 +46,18 @@ export function earnClickDestination(raw: string, base: string): boolean {
     }
 }
 
+function matchingSignedOffers(card: RenderedRewardCard, offers: ParsedOffer[], base: string): ParsedOffer[] {
+    const cardUrl = normalizeRewardUrl(card.destination, base, true)
+    const cardTitle = normalizeCardText(card.title)
+    return offers.filter(
+        offer =>
+            card.offerIds.includes(offer.offerId) ||
+            (cardUrl !== null &&
+                normalizeCardText(offer.title) === cardTitle &&
+                normalizeRewardUrl(offer.destination, base, true) === cardUrl)
+    )
+}
+
 /** Click the Rewards control itself: external navigation alone loses its onClick report. */
 export async function clickEarnCards(bot: MicrosoftRewardsBot, previous?: EarnClickState): Promise<EarnClickState> {
     const state = previous ?? { attemptedKeys: new Set(), attemptedOfferIds: new Set(), waves: 0, complete: false }
@@ -57,16 +71,18 @@ export async function clickEarnCards(bot: MicrosoftRewardsBot, previous?: EarnCl
             )
             const eligible = (card: RenderedRewardCard) => {
                 if (card.disabled || card.complete || card.points <= 0) return false
+                if (card.offerIds.some(isNonActionableBannerOfferId)) return false
                 if (
                     card.section === 'exploreonbing'
                         ? !bot.config.activities.searchOnBing
                         : !bot.config.activities.urlReward
                 )
                     return false
-                const signed = snapshot.offers.filter(offer => card.offerIds.includes(offer.offerId))
+                const signed = matchingSignedOffers(card, snapshot.offers, page.url())
                 if (
                     signed.some(
                         offer =>
+                            isNonActionableBannerOfferId(offer.offerId) ||
                             offer.isCompleted ||
                             offer.isDisabled ||
                             (offer.date && offer.date > new Date().toISOString().slice(0, 10)) ||
@@ -95,15 +111,11 @@ export async function clickEarnCards(bot: MicrosoftRewardsBot, previous?: EarnCl
                 const key = earnCardKey(card)
                 state.attemptedKeys.add(key)
                 for (const id of card.offerIds) state.attemptedOfferIds.add(id)
-                const signed = bot.browser.react
-                    .snapshotPage(await page.content())
-                    .offers.filter(
-                        offer =>
-                            card.offerIds.includes(offer.offerId) ||
-                            (normalizeCardText(offer.title) === normalizeCardText(card.title) &&
-                                normalizeRewardUrl(offer.destination, page.url(), true) ===
-                                    normalizeRewardUrl(card.destination, page.url(), true))
-                    )
+                const signed = matchingSignedOffers(
+                    card,
+                    bot.browser.react.snapshotPage(await page.content()).offers,
+                    page.url()
+                )
                 if (signed.length === 1) state.attemptedOfferIds.add(signed[0]!.offerId)
                 const originalPages = new Set(page.context().pages())
                 try {

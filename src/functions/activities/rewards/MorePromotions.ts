@@ -1,4 +1,5 @@
 import { clickEarnCards } from './RenderedEarnActions'
+import { isNonActionableBannerOfferId } from '../../../browser/parsers/RewardCardParser'
 import { emitRuntimeEvent } from '../../../util/RuntimeEvents'
 import { BaseActivity } from '../BaseActivity'
 import type { BasePromotion, DashboardData } from '../../../interface/DashboardData'
@@ -66,7 +67,7 @@ export class MorePromotions extends BaseActivity {
             const existing = promotions.get(offer.offerId)
             // Modern cards may omit promotionType and expose only their report activityType.
             const type = offer.promotionType?.toLowerCase() ?? ''
-            if (/pcchild|pcparent/i.test(offer.offerId)) continue
+            if (/pcchild|pcparent/i.test(offer.offerId) || isNonActionableBannerOfferId(offer.offerId)) continue
             if (['search', 'claim', 'redeem', 'badge'].includes(type)) continue
             if (!existing && type !== 'urlreward' && offer.points <= 0) continue
             promotions.set(offer.offerId, {
@@ -86,7 +87,11 @@ export class MorePromotions extends BaseActivity {
 
         for (const promotion of promotions.values()) {
             const type = promotion.promotionType?.toLowerCase() ?? ''
-            if (['search', 'claim', 'redeem', 'badge'].includes(type) || /pcchild|pcparent/i.test(promotion.offerId)) {
+            if (
+                ['search', 'claim', 'redeem', 'badge'].includes(type) ||
+                /pcchild|pcparent/i.test(promotion.offerId) ||
+                isNonActionableBannerOfferId(promotion.offerId)
+            ) {
                 promotions.delete(promotion.offerId)
                 continue
             }
@@ -107,6 +112,7 @@ export class MorePromotions extends BaseActivity {
             !excluded.has(offer.offerId) && !/pcchild|pcparent/i.test(offer.offerId)
         const needsWork = (offer: ParsedOffer) =>
             belongsHere(offer) &&
+            !isNonActionableBannerOfferId(offer.offerId) &&
             !offer.isCompleted &&
             !offer.isLocked &&
             !(offer.date && offer.date > new Date().toISOString().slice(0, 10)) &&
@@ -201,7 +207,8 @@ export class MorePromotions extends BaseActivity {
                       ? 'missing-hash'
                       : this.bot.config.skipNonPointTasks && offer.points <= 0
                         ? 'non-point-task'
-                        : ['search', 'claim', 'redeem', 'badge'].includes(offer.promotionType?.toLowerCase() ?? '')
+                        : isNonActionableBannerOfferId(offer.offerId) ||
+                            ['search', 'claim', 'redeem', 'badge'].includes(offer.promotionType?.toLowerCase() ?? '')
                           ? 'handled-by-other-worker'
                           : pending.some(p => p.offerId === offer.offerId)
                             ? 'completion-unverified'

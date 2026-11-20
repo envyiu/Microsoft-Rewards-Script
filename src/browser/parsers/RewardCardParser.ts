@@ -2,6 +2,12 @@
 import type { Locator, Page } from 'patchright'
 
 const TRACKING_PARAMETERS = new Set(['form', 'ocid', 'publ', 'crea'])
+const NON_ACTIONABLE_BANNER_OFFER_ID = /(?:^|[_-])banner(?:$|[_-])/i
+
+export function isNonActionableBannerOfferId(offerId: string | null | undefined): boolean {
+    if (!offerId) return false
+    return NON_ACTIONABLE_BANNER_OFFER_ID.test(offerId.trim())
+}
 
 export function normalizeRewardUrl(raw: string | undefined, base: string, removeTracking = false): string | null {
     if (!raw?.trim()) return null

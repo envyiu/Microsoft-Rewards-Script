@@ -1,5 +1,10 @@
 import type { PageSnapshot, ParsedOffer } from '../ReactFunc'
-import { normalizeCardText, normalizeRewardUrl, type RenderedRewardCard } from './RewardCardParser'
+import {
+    isNonActionableBannerOfferId,
+    normalizeCardText,
+    normalizeRewardUrl,
+    type RenderedRewardCard
+} from './RewardCardParser'
 
 /** Rendered state supplements signed RSC offers; it never manufactures an action hash. */
 export function mergeRenderedEarn(snapshot: PageSnapshot, cards: RenderedRewardCard[], base: string): number {
@@ -15,7 +20,14 @@ export function mergeRenderedEarn(snapshot: PageSnapshot, cards: RenderedRewardC
             )
         })
         if (candidates.length !== 1) {
-            if (!card.disabled && !card.complete && card.points > 0) unmatched++
+            if (
+                !card.disabled &&
+                !card.complete &&
+                card.points > 0 &&
+                !card.offerIds.some(isNonActionableBannerOfferId)
+            ) {
+                unmatched++
+            }
             continue
         }
         const offer = candidates[0] as ParsedOffer

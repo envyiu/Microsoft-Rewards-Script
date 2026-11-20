@@ -395,3 +395,53 @@ for (const promotional of [true, false]) {
         assert.deepEqual(errors, [])
     })
 }
+
+test('non-actionable activation banners like Deck the walls are skipped and do not block completion', async () => {
+    const activationBanner = {
+        offerId: 'WW_BICYearEndWallpaperNov26_Activation_Banner',
+        title: 'Deck the walls',
+        promotionType: 'urlreward',
+        points: 500,
+        pointProgressMax: 500,
+        hash: 'fixture-banner',
+        reportable: true,
+        isCompleted: false,
+        isLocked: false
+    }
+    const trip = {
+        offerId: 'WW_Rewards_Campaign_Global_EU_Expansion_BingOffer1',
+        title: 'Plan a trip',
+        promotionType: 'urlreward',
+        points: 5,
+        hash: 'fixture-trip',
+        reportable: true,
+        isCompleted: false,
+        isLocked: false
+    }
+
+    const bannerOnlyCalls = []
+    const botBannerOnly = {
+        logger,
+        config: { skipNonPointTasks: true, activities: { urlReward: true } },
+        executionPlan: { urgent: true },
+        utils: { randomDelay: () => 0, wait: async () => {} },
+        browser: { func: { refreshEarnSnapshot: async () => ({ offers: [activationBanner] }) } },
+        activities: { doUrlReward: async promotion => bannerOnlyCalls.push(promotion.offerId) }
+    }
+    await new MorePromotions(botBannerOnly).run({ dashboard: { morePromotions: [activationBanner] } })
+    assert.deepEqual(bannerOnlyCalls, [])
+    assert.equal(botBannerOnly.morePromotionsVerified, true)
+
+    const mixedCalls = []
+    const botMixed = {
+        logger,
+        config: { skipNonPointTasks: true, activities: { urlReward: true } },
+        executionPlan: { urgent: true },
+        utils: { randomDelay: () => 0, wait: async () => {} },
+        browser: { func: { refreshEarnSnapshot: async () => ({ offers: [activationBanner, trip] }) } },
+        activities: { doUrlReward: async promotion => mixedCalls.push(promotion.offerId) }
+    }
+    await new MorePromotions(botMixed).run({ dashboard: { morePromotions: [activationBanner] } })
+    assert.deepEqual(mixedCalls, [trip.offerId])
+    assert.equal(botMixed.morePromotionsVerified, false)
+})
