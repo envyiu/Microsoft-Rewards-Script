@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { consumeAiTurn } from './AiSearchTransport'
 import type { BrowserContext } from 'patchright'
 import type { ExecutionPlan } from '../interface/ExecutionPlan'
 
@@ -62,7 +63,7 @@ export class NormalSession {
         const url = new URL(rawUrl)
         if (
             !/(^|\.)bing\.com$/.test(url.hostname) ||
-            (!/\/(?:search|searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) &&
+            (!/\/(?:search|copilotsearch|searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) &&
                 !(url.pathname === '/images/search' && url.searchParams.has('bcid')))
         )
             return
@@ -78,9 +79,13 @@ export class NormalSession {
         await context.route(/https?:\/\/(?:[^/]+\.)?bing\.com\//, async route => {
             const url = new URL(route.request().url())
             if (
-                !/\/(?:search|searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) &&
+                !/\/(?:search|copilotsearch|searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) &&
                 !(url.pathname === '/images/search' && url.searchParams.has('bcid'))
             ) {
+                await route.fallback()
+                return
+            }
+            if (consumeAiTurn(route.request()) && !this.blocked) {
                 await route.fallback()
                 return
             }

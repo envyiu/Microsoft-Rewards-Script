@@ -134,6 +134,7 @@ export const ConfigObjectSchema = z.object({
     searchSettings: z.object({
         scrollRandomResults: z.boolean(),
         clickRandomResults: z.boolean(),
+        aiSearch: z.boolean().default(false),
         runOnZeroPoints: z.boolean().default(false),
         maxBonusSearches: z.number().default(110),
         parallelSearching: z.boolean(),
@@ -283,6 +284,7 @@ export const defaultConfig: Config = {
     searchSettings: {
         scrollRandomResults: true,
         clickRandomResults: true,
+        aiSearch: false,
         runOnZeroPoints: false,
         maxBonusSearches: 110,
         parallelSearching: true,

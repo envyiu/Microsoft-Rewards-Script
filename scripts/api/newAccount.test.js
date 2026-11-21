@@ -317,6 +317,13 @@ test('search72h runtime saves verified search before checkpoint, never visits se
         })
         await assert.rejects(runNewAccountSession(bot, { email: 'fixture@gmail.com' }, context, page), /uncertain/)
         assert.equal(checkpoints.length, 1)
+        // An unavailable AI initial attempt is reserved, but is not a verified checkpoint.
+        let attempted = 0
+        bot.executionPlan.searchBudget = 2
+        t.mock.method(Search.prototype, 'doUncountedQuery', async () => (++attempted === 1 ? false : true))
+        await runNewAccountSession(bot, { email: 'fixture@gmail.com' }, context, page)
+        assert.equal(checkpoints.length, 2)
+        assert.equal(checkpoints.at(-1).queries, 1)
         bot.executionPlan.services = ['outlook']
         await assert.rejects(runNewAccountSession(bot, { email: 'fixture@gmail.com' }, context, page), /Search-only/)
     } finally {

@@ -156,3 +156,19 @@ test('existing worker refuses to invent fresh progress when both Smart files are
     fs.rmSync(file + '.last-good', { force: true })
     await assert.rejects(worker.restart(), /Existing worker has lost Smart state/)
 })
+
+test('AI Search is explicit, capability-advertised and retains its configuration over restart', async t => {
+    const worker = await workerFixture(t, { kind: 'local' })
+    const body = snapshot(worker)
+    assert.equal(body.botConfig.searchSettings.aiSearch, false)
+    body.botConfig.searchSettings.aiSearch = true
+    body.revision = crypto.randomBytes(32).toString('hex')
+    assert.equal((await worker.request('/internal/hybrid/snapshot', 'PUT', body)).status, 200)
+    await worker.restart()
+    const status = (await worker.request('/internal/hybrid/status')).data
+    assert.equal(status.capabilities.aiSearchV1, true)
+    assert.equal(
+        JSON.parse(fs.readFileSync(path.join(worker.data, 'config.json'), 'utf8')).searchSettings.aiSearch,
+        true
+    )
+})

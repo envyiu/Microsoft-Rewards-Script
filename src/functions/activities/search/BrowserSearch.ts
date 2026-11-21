@@ -7,6 +7,7 @@ import { URLs } from '../../../constants/urls'
 import { SearchQueryQueue } from '../../SearchQueryQueue'
 import { BaseActivity } from '../BaseActivity'
 import { BonusTracker } from './BonusTracker'
+import { AiSearch, aiSearchChoice } from './AiSearch'
 import { SearchProgress } from './SearchProgress'
 import type { SearchTracker } from '../../../interface/Search'
 import type { MissingSearchPoints } from '../../../interface/Points'
@@ -29,17 +30,22 @@ interface SessionStats {
 
 export class Search extends BaseActivity {
     private searchCount = 0
+    private aiUnavailable = false
 
-    public async doUncountedQuery(page: Page, query: string, isMobile: boolean): Promise<void> {
-        await this.bingSearch(page, query, isMobile, 'warmup')
+    public async doUncountedQuery(page: Page, query: string, isMobile: boolean): Promise<boolean> {
+        const aiConfirmed = await this.bingSearch(page, query, isMobile, 'warmup')
+        if (typeof aiConfirmed === 'boolean') return aiConfirmed
         const url = new URL(page.url())
         if (
             !['www.bing.com', 'bing.com'].includes(url.hostname) ||
-            url.pathname !== '/search' ||
+            !['/search', '/copilotsearch'].includes(url.pathname) ||
             url.searchParams.get('q') !== query
         )
             throw new Error('Bing search result was not confirmed')
-        await page.locator('#b_results').waitFor({ state: 'visible', timeout: 15000 })
+        await page
+            .locator(url.pathname === '/copilotsearch' ? '#b_copilot_results' : '#b_results')
+            .waitFor({ state: 'visible', timeout: 15000 })
+        return true
     }
 
     public async doSearch(page: Page, isMobile: boolean, budget?: number): Promise<number> {
@@ -191,8 +197,23 @@ export class Search extends BaseActivity {
         query: string,
         isMobile: boolean,
         kind: 'normal' | 'warmup' | 'bonus' = 'normal'
-    ): Promise<void> {
+    ): Promise<boolean | void> {
         this.searchCount++
+        if (
+            this.bot.config.searchSettings.aiSearch === true &&
+            !this.aiUnavailable &&
+            kind !== 'bonus' &&
+            ['accountSession', 'warmup'].includes(this.bot.executionPlan?.type ?? '')
+        ) {
+            const choice = aiSearchChoice()
+            if (choice.ai) {
+                const confirmed = await new AiSearch(this.bot).run(page, query, isMobile, kind, choice)
+                this.aiUnavailable = !confirmed
+                return confirmed
+            }
+        }
+        if (this.bot.config.searchSettings.aiSearch === true && new URL(page.url()).pathname === '/copilotsearch')
+            await page.goto(URLs.bing.origin)
 
         if (this.searchCount % REFRESH_EVERY === 0) {
             await page.goto(URLs.bing.origin)

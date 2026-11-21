@@ -34,6 +34,7 @@
     "searchSettings": {
         "scrollRandomResults": false,
         "clickRandomResults": false,
+        "aiSearch": false,
         "runOnZeroPoints": false,
         "maxBonusSearches": 110,
         "parallelSearching": true,

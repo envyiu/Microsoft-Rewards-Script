@@ -86,6 +86,10 @@ export const BOT_CONFIG_METADATA = {
         {
             title: 'Search settings',
             fields: {
+                'searchSettings.aiSearch': {
+                    label: 'AI Search',
+                    desc: 'Use AI Search for 70% of Smart/warmup queries, with optional feedback and up to two same-conversation followups. Requires aiSearchV1.'
+                },
                 'searchSettings.scrollRandomResults': {
                     label: 'Scroll random results',
                     desc: 'Scroll randomly on results'

@@ -113,11 +113,12 @@ export async function runNewAccountSession(
     await page.goto('https://www.bing.com/', { waitUntil: 'domcontentloaded', timeout: 30000 })
     const rejectCookies = page.locator('#bnp_btn_reject').first()
     if (await rejectCookies.isVisible().catch(() => false)) await rejectCookies.click({ timeout: 5000 })
+    let verifiedQueries = 0
     for (let queries = 1; queries <= plan.searchBudget; queries++) {
         if (bot.shuttingDown) throw new Error('New account session interrupted')
         const query = await queue.next()
         if (!query) throw new Error('Search query queue exhausted')
-        await search.doUncountedQuery(page, query, bot.isMobile)
-        await checkpoint(queries)
+        if ((await search.doUncountedQuery(page, query, bot.isMobile)) === false) continue
+        await checkpoint(++verifiedQueries)
     }
 }

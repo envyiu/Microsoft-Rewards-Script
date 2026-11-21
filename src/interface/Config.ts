@@ -28,6 +28,7 @@ export type QueryEngineEntry = QueryEngine | RssFeedSelector
 export interface ConfigSearchSettings {
     scrollRandomResults: boolean
     clickRandomResults: boolean
+    aiSearch?: boolean
     runOnZeroPoints: boolean
     maxBonusSearches: number
     parallelSearching: boolean

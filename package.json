@@ -1,6 +1,6 @@
 {
     "name": "microsoft-rewards-script",
-    "version": "4.3.20",
+    "version": "4.3.21",
     "description": "Automatically do tasks for Microsoft Rewards but in TS!",
     "author": "Netsky",
     "license": "GPL-3.0-or-later",
@@ -27,6 +27,7 @@
         "test:urgent-api": "node --test scripts/api/urgentApi.test.js",
         "test:urgent-execution": "node --test scripts/api/urgentExecution.test.js",
         "test:smart-scheduler": "node --test scripts/api/smartScheduler.test.js",
+        "test:ai-search": "node --test scripts/api/aiSearch.test.js scripts/api/aiSearch.browser.test.js",
         "test:normal-sessions": "node --test scripts/api/normalSession.test.js scripts/api/smartScheduler.test.js",
         "test:hybrid": "node --test scripts/api/hybrid.test.js scripts/api/hybridApi.test.js scripts/api/botCheckpoint.test.js",
         "test:account-store": "node --test scripts/api/accountStore.test.js",

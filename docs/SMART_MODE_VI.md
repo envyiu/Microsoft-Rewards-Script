@@ -234,3 +234,17 @@ Acc khác có cùng nhóm proxy phải chờ tới `retryAt`; Request run, Run n
 ## Visual Search dùng hạn mức riêng
 
 Visual Search không trừ quota search ngày, trần 5 query chung/phiên hoặc bộ đếm search của learning. Quota Microsoft của search thường đầy, thiếu hoặc cũ không chặn Visual Search và không dùng tiến độ điểm search thường để xác minh tác vụ này. Visual Search được đặt trước tối đa 4 lần thử/phiên trong journal `.visual` riêng, giữ qua khôi phục cùng phiên; chỉ chạy trong phiên desktop có worker `visualSearch`. Khóa tài khoản/đăng nhập vẫn áp dụng. Vé gửi Visual Search không cho phép gửi query web thường. Thành công vẫn cần xác minh điểm hoặc trạng thái streak Visual Search từ Microsoft, không chỉ HTTP 200.
+
+## AI Search trong Smart và warmup
+
+`searchSettings.aiSearch` mặc định false nếu cấu hình cũ thiếu trường này. Manager chỉ đồng bộ cấu hình bật AI tới worker có `aiSearchV1`; lịch/phiên, quota streak và quota Microsoft vẫn áp dụng. Sau rollout đã xác minh phiên bản, bật riêng cấu hình các node hỗ trợ; node offline giữ tắt cho tới khi nâng cấp.
+
+Mỗi query thường chọn độc lập 70% AI Search tại `/copilotsearch`, 30% web thường. Daily Set, quest, bonus và Visual Search không đổi. Khi câu đầu AI đã kết thúc streaming, lấy mẫu 50% không phản hồi, 10% Dislike, 40% Like; chỉ sau Like được xác nhận mới có 30% hỏi tiếp. Sau câu thứ hai thực sự hoàn thành mới lấy mẫu 10% câu thứ ba. Không ép tỷ lệ theo ngày và không lấy mẫu lại để bù các nhánh bị bỏ qua.
+
+Câu mở đầu dùng một reservation bình thường. AI chạy trong tab riêng cùng browser context/cookie, đóng tab sau lượt. Các câu tiếp được tạo cục bộ từ lời mời cuối câu trả lời mới nhất, giữ cụm trong ngoặc và các lựa chọn; bỏ qua nội dung không rõ, chỉ dẫn thao tác ngoài hỏi đáp và câu đã gửi. Không dùng API AI bên ngoài. Chuột/cuộn qua ghost cursor; nhập bằng bàn phím.
+
+Bing hiện gửi nội dung hội thoại qua `/search` với `cpltsrchif`, `convid`, `turnindex`. `AiConversation` cấp quyền từng request đã khớp đúng tab, câu hỏi, hội thoại và lượt (tối đa 3), tối đa một request cho mỗi biến thể iframe/AJAX của lượt. Quyền này đi qua guard riêng, không tiêu thụ thêm reservation, không cho điều hướng tìm kiếm mới, không phát lại sau đóng tab/restart; không mở ngoại lệ chung cho mọi request Bing. Trạng thái warmup vẫn chỉ checkpoint query đầu đã xác nhận và lưu session, không cộng câu tiếp thành query mới.
+
+Chờ câu đầu tối đa 45 giây, câu tiếp 30 giây, cả tab AI tối đa 120 giây. Timeout đóng tab để hủy thao tác đang chờ. Thiếu AI/câu đầu chưa xác nhận: giữ reservation đã dùng, không gửi search thay thế ngoài reservation, tắt AI trong phần còn lại của phiên. Thiếu nút/composer hoặc Like chưa xác nhận: chỉ bỏ tương tác đó. Pacing search 20–40 giây và cơ chế kiểm tra điểm/quota hiện có giữ nguyên; tăng điểm không được suy ra từ việc AI trả lời.
+
+Log `AI-SEARCH stage=...` và telemetry activity `task=aiSearch` theo dõi riêng lượt đầu, Like/Dislike/không phản hồi, câu tiếp hoàn tất và lý do bỏ qua. Không ghi nội dung câu hỏi tiếp hoặc câu trả lời vào telemetry. Dùng `npm run test:ai-search` sau build để chạy parser/xác suất và fixture Desktop/Mobile, không dùng tài khoản thật.

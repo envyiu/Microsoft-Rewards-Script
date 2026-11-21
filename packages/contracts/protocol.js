@@ -10,6 +10,7 @@ export function workerCapabilities(kind, environment = process.env) {
         conservativeSessionsV1: true,
         dailySearchLimitsV1: true,
         streakSearchV1: true,
+        aiSearchV1: true,
         proxyCooldownV1: true,
         learningTelemetryV1: true,
         structuredRuntimeEventsV1: true,
