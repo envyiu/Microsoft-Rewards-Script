@@ -248,3 +248,9 @@ Bing hiện gửi nội dung hội thoại qua `/search` với `cpltsrchif`, `co
 Chờ câu đầu tối đa 45 giây, câu tiếp 30 giây, cả tab AI tối đa 120 giây. Timeout đóng tab để hủy thao tác đang chờ. Thiếu AI/câu đầu chưa xác nhận: giữ reservation đã dùng, không gửi search thay thế ngoài reservation, tắt AI trong phần còn lại của phiên. Thiếu nút/composer hoặc Like chưa xác nhận: chỉ bỏ tương tác đó. Pacing search 20–40 giây và cơ chế kiểm tra điểm/quota hiện có giữ nguyên; tăng điểm không được suy ra từ việc AI trả lời.
 
 Log `AI-SEARCH stage=...` và telemetry activity `task=aiSearch` theo dõi riêng lượt đầu, Like/Dislike/không phản hồi, câu tiếp hoàn tất và lý do bỏ qua. Không ghi nội dung câu hỏi tiếp hoặc câu trả lời vào telemetry. Dùng `npm run test:ai-search` sau build để chạy parser/xác suất và fixture Desktop/Mobile, không dùng tài khoản thật.
+
+### Nhịp thao tác AI Search
+
+Mỗi lượt mở `/copilotsearch?q=` trống, nghỉ 0,5–1 giây, dùng Ghost Cursor chọn composer, nghỉ 0,25–0,5 giây rồi gõ từng ký tự (35–65 ms/ký tự). Nghỉ 0,4–0,8 giây trước Enter. Mở trang trống không phải search; reservation và vé gửi query chỉ được cấp ngay trước Enter. Cả hai dạng phản hồi của Bing (điều hướng tới URL đã có query hoặc AJAX/iframe trong trang trống) dùng đúng một reservation.
+
+Chỉ sau khi đã xác nhận AI trả lời hoàn chỉnh mới dừng đọc thêm 5–8 giây, cuộn bằng Ghost Cursor tới cuối trang, dừng 1–1,5 giây rồi nhấn phản hồi đã lấy mẫu. Câu tiếp cũng có nhịp nghỉ trước click, gõ từng ký tự, nghỉ trước gửi và đọc/cuộn sau câu trả lời. Tổng thời hạn tab AI vẫn là 120 giây; nếu không còn đủ thời gian cho thao tác thì bỏ phần tùy chọn, không chạy dồn. Thời gian nghỉ search 20–40 giây vẫn giữ riêng theo cấu hình hiện có.

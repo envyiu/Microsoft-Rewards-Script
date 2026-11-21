@@ -23,6 +23,7 @@ export interface AiSearchOptions {
 const TURNS = '#b_copilot_search .ca_turn, #b_copilot_results .b_copilot_turn'
 const LIKE = 'button.ca_like, [id^="cps_feedback_like_"]'
 const DISLIKE = 'button.ca_dislike, [id^="cps_feedback_dislike_"]'
+const SUBMIT = ':is(#b_copilot_search .b_copilot_send, #b_copilot_composer_form .b_csb_submit, .b_csb_submit)'
 
 export class AiSearch {
     private deadline = 0
@@ -38,6 +39,22 @@ export class AiSearch {
     private active(): void {
         if (this.bot.shuttingDown) throw new Error('New account session interrupted')
         this.bot.normalSession?.assertActive()
+    }
+
+    private checkVerificationUrl(page: Page): void {
+        let location: URL
+        try {
+            location = new URL(page.url())
+        } catch {
+            return
+        }
+        if (
+            /login\.live\.com|account\.live\.com/.test(location.hostname) ||
+            /captcha|challenge|\/sorry/i.test(location.pathname)
+        ) {
+            this.bot.normalSession?.observe('AI-SEARCH', 'Verification required', 'error')
+            throw new Error('AI Search requires interactive verification')
+        }
     }
 
     private event(mobile: boolean, stage: string, reason = ''): void {
@@ -59,13 +76,15 @@ export class AiSearch {
             stable = 0
         while (Date.now() < end && !page.isClosed()) {
             this.active()
+            this.checkVerificationUrl(page)
             const count = await page.locator(TURNS).evaluateAll(elements => {
-                const last = elements.at(-1)
-                last?.setAttribute('data-msrw-ai-turn', String(elements.length))
+                elements.forEach(e => e.removeAttribute('data-msrw-ai-turn'))
+                const lastEl = elements.at(-1)
+                lastEl?.setAttribute('data-msrw-ai-turn', String(elements.length))
                 return elements.length
             })
             if (count) {
-                const turn = page.locator(`[data-msrw-ai-turn="${count}"]`)
+                const turn = page.locator(`[data-msrw-ai-turn="${count}"]`).first()
                 const key =
                     (await turn.getAttribute('turnid')) ||
                     (await turn.getAttribute('data-turn-id')) ||
@@ -80,38 +99,54 @@ export class AiSearch {
                     : null
                 const scope: Page | Frame = (await iframe?.contentFrame()) || page
                 const root = scope === page ? turn : scope.locator('body')
-                if (
-                    await root
+                const rootError = await root
+                    .locator('.error_text, [data-ai-error]')
+                    .first()
+                    .isVisible()
+                    .catch(() => false)
+                const turnError =
+                    scope !== page &&
+                    (await turn
                         .locator('.error_text, [data-ai-error]')
+                        .first()
                         .isVisible()
-                        .catch(() => false)
-                )
-                    return null
+                        .catch(() => false))
+                if (rootError || turnError) return null
                 const text = await root
                     .evaluate(element => {
+                        const candidate = element.querySelector('[data-ai-answer], .cplt_answer, .b_copilot_response')
                         const response =
-                            element.querySelector('[data-ai-answer], .cplt_answer, .b_copilot_response') || element
+                            candidate && (candidate.textContent || '').trim().length >= 20 ? candidate : element
                         const copy = response.cloneNode(true) as HTMLElement
                         copy.querySelectorAll(
-                            'script,style,button,textarea,nav,aside,.ca_userquery,.ca_answer_footer,.cplt_answer_footer,.ca_feedback_btns,.cplt_citations,.b_copilot_references,.b_algo,[data-ai-sources]'
+                            'script,style,button,textarea,nav,aside,.ca_userquery,.b_copilot_user_query,.cht_loading_state,.ca_answer_footer,.cplt_answer_footer,.cht_ans_footer,.ca_feedback_btns,.cps_feedback,.cplt_citations,.cht_cit_src_footer,.b_copilot_references,.b_algo,[data-ai-sources]'
                         ).forEach(e => e.remove())
                         return (copy.textContent || '').replace(/\u00a0/g, ' ').trim()
                     })
                     .catch(() => '')
-                const streaming = await root
-                    .locator('[aria-busy="true"], [data-streaming="true"], .is-streaming')
-                    .count()
-                const stopped = await page.locator('.b_copilot_stop_streaming:visible').count()
-                const completed = await root
-                    .locator(
-                        '[data-streaming="false"], [data-ai-complete="true"], .cplt_answer_footer, .ca_answer_footer'
-                    )
-                    .count()
-                const feedback = await root
-                    .locator(LIKE)
-                    .last()
-                    .isVisible()
-                    .catch(() => false)
+                const streamingSel =
+                    '[aria-busy="true"], [data-streaming="true"], .is-streaming, .cht_loading_state:not(.b_hide)'
+                const completedSel =
+                    '[data-streaming="false"], [data-ai-complete="true"], .cplt_answer_footer, .ca_answer_footer, .cht_ans_footer'
+                const streaming =
+                    (await root.locator(streamingSel).count()) +
+                    (scope === page ? 0 : await turn.locator(streamingSel).count())
+                const stopped = await page.locator('.b_copilot_stop_streaming:visible, .b_csb_stop:visible').count()
+                const completed =
+                    (await root.locator(completedSel).count()) +
+                    (scope === page ? 0 : await turn.locator(completedSel).count())
+                const feedback =
+                    (await root
+                        .locator(LIKE)
+                        .first()
+                        .isVisible()
+                        .catch(() => false)) ||
+                    (scope !== page &&
+                        (await turn
+                            .locator(LIKE)
+                            .first()
+                            .isVisible()
+                            .catch(() => false)))
                 const signature = `${key}:${text}`
                 stable = signature === last ? stable + 1 : 0
                 if (
@@ -138,6 +173,11 @@ export class AiSearch {
             answer.scope === answer.turn.page()
                 ? answer.turn.locator(selector).first()
                 : answer.scope.locator(selector).first()
+        if (await inside.count()) return inside
+        if (answer.scope !== answer.turn.page()) {
+            const outer = answer.turn.locator(selector).first()
+            if (await outer.count()) return outer
+        }
         await inside
             .waitFor({ state: 'attached', timeout: Math.max(1, Math.min(1000, this.deadline - Date.now())) })
             .catch(() => {})
@@ -152,12 +192,103 @@ export class AiSearch {
         if (!handle) return false
         const cursor = this.bot.browser.utils.cursor(page)
         await cursor.scrollIntoView(handle as unknown as Parameters<typeof cursor.scrollIntoView>[0], {
-            scrollSpeed: 70,
-            scrollDelay: 100
+            scrollSpeed: 100,
+            scrollDelay: 50
         })
         // Element handles also work for feedback rendered inside Bing's result iframe.
-        await cursor.click(handle as unknown as NonNullable<Parameters<typeof cursor.click>[0]>)
+        await cursor.click(handle as unknown as NonNullable<Parameters<typeof cursor.click>[0]>, {
+            paddingPercentage: 25
+        })
         return true
+    }
+
+    private async pause(min: number, max: number): Promise<void> {
+        let remaining = Number(this.bot.utils.randomDelay(min, max))
+        while (remaining > 0) {
+            this.active()
+            if (this.expired || Date.now() >= this.deadline) {
+                this.expired = true
+                throw new Error('AI interaction deadline reached')
+            }
+            const part = Math.min(remaining, 200)
+            await waitForActivity(this.bot, part)
+            remaining -= part
+        }
+        this.active()
+    }
+
+    private async type(page: Page, text: string): Promise<void> {
+        for (const character of text) {
+            this.active()
+            if (this.expired || Date.now() >= this.deadline) {
+                this.expired = true
+                throw new Error('AI interaction deadline reached')
+            }
+            await page.keyboard.type(character, { delay: Number(this.bot.utils.randomDelay(35, 65)) })
+        }
+    }
+
+    private async scrollToBottom(page: Page): Promise<void> {
+        const cursor = this.bot.browser.utils.cursor(page) as unknown as {
+            moveTo?: (destination: { x: number; y: number }) => Promise<void>
+            scroll: (
+                delta: Partial<{ x: number; y: number }>,
+                options?: { scrollSpeed?: number; scrollDelay?: number }
+            ) => Promise<void>
+            scrollTo: (destination: 'bottom', options?: { scrollSpeed?: number; scrollDelay?: number }) => Promise<void>
+        }
+        if (typeof cursor.moveTo !== 'function') {
+            await cursor.scrollTo('bottom', { scrollSpeed: 65, scrollDelay: 150 })
+            return
+        }
+        for (let pass = 0; pass < 2; pass++) {
+            const target = await page
+                .evaluate(turnsSelector => {
+                    const isScrollable = (el: HTMLElement | null) => {
+                        if (!el) return false
+                        const overflowY = getComputedStyle(el).overflowY
+                        return (overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 4
+                    }
+                    let container: HTMLElement | null = document.querySelector('.b_cpsv2_main') as HTMLElement | null
+                    if (!container || container.scrollHeight <= container.clientHeight + 4) {
+                        container = null
+                        let cur = (document.querySelector(turnsSelector) as HTMLElement | null)?.parentElement || null
+                        while (cur && cur !== document.body && cur !== document.documentElement) {
+                            if (isScrollable(cur)) {
+                                container = cur
+                                break
+                            }
+                            cur = cur.parentElement
+                        }
+                    }
+                    if (container) {
+                        const rect = container.getBoundingClientRect()
+                        return {
+                            x: rect.left + rect.width / 2,
+                            y: rect.top + rect.height / 2,
+                            delta: Math.max(0, container.scrollHeight - container.clientHeight - container.scrollTop)
+                        }
+                    }
+                    const sh = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0)
+                    return {
+                        x: window.innerWidth / 2,
+                        y: window.innerHeight / 2,
+                        delta: Math.max(0, sh - window.innerHeight - window.scrollY)
+                    }
+                }, TURNS)
+                .catch(() => null)
+            if (!target || target.delta <= (pass === 0 ? 4 : 40)) break
+            await cursor.moveTo({ x: target.x, y: target.y })
+            await cursor.scroll({ y: target.delta }, { scrollSpeed: 65, scrollDelay: 150 })
+        }
+    }
+
+    private async readAndScroll(page: Page, mobile: boolean): Promise<void> {
+        this.event(mobile, 'reading')
+        await this.pause(5000, 8000)
+        await this.scrollToBottom(page)
+        this.event(mobile, 'scrolled-bottom')
+        await this.pause(1000, 1500)
     }
 
     async run(
@@ -168,6 +299,7 @@ export class AiSearch {
         choice: AiChoice
     ): Promise<boolean> {
         this.active()
+        this.expired = false
         const page = await this.bot.newBrowserPage(source.context())
         this.deadline = Date.now() + (this.options.totalMs ?? 120000)
         const timer = setTimeout(
@@ -190,20 +322,41 @@ export class AiSearch {
         let confirmed = false
         try {
             await conversation.install()
+            await page.goto('https://www.bing.com/copilotsearch?q=', {
+                waitUntil: 'domcontentloaded',
+                timeout: Math.min(20000, this.options.totalMs ?? 120000)
+            })
+            this.checkVerificationUrl(page)
+            const initialInput = page.locator('textarea[id^="b_copilot_composer_"]:visible').first()
+            const inputReady = await initialInput
+                .waitFor({
+                    state: 'visible',
+                    timeout: Math.max(1, Math.min(15000, this.deadline - Date.now()))
+                })
+                .then(() => true)
+                .catch(error => {
+                    this.active()
+                    if (error instanceof Error && error.name === 'TimeoutError') return false
+                    throw error
+                })
+            if (!inputReady) {
+                this.event(mobile, 'skipped', 'initial-composer-unavailable')
+                return false
+            }
+            await page
+                .waitForLoadState('load', { timeout: Math.min(5000, Math.max(1, this.deadline - Date.now())) })
+                .catch(() => {})
+            await this.pause(500, 1000)
+            if (!(await this.click(page, initialInput)) || (await initialInput.inputValue()).trim()) return false
+            await this.pause(250, 500)
+            await this.type(page, query)
+            await this.pause(400, 800)
             await learningQuery(kind, mobile, async () => {
                 try {
-                    await page.goto(`https://www.bing.com/copilotsearch?q=${encodeURIComponent(query)}`, {
-                        waitUntil: 'domcontentloaded',
-                        timeout: Math.min(20000, this.options.totalMs ?? 120000)
-                    })
-                    const location = new URL(page.url())
-                    if (
-                        /login\.live\.com|account\.live\.com/.test(location.hostname) ||
-                        /captcha|challenge|\/sorry/i.test(location.pathname)
-                    ) {
-                        this.bot.normalSession?.observe('AI-SEARCH', 'Verification required', 'error')
-                        throw new Error('AI Search requires interactive verification')
-                    }
+                    if (!conversation.armInitial()) throw new Error('AI initial submission already reserved')
+                    this.event(mobile, 'initial-enter')
+                    await page.keyboard.press('Enter')
+                    this.checkVerificationUrl(page)
                     let answer = await this.answer(page)
                     if (!answer) {
                         this.event(mobile, 'skipped', 'answer-unavailable')
@@ -211,7 +364,7 @@ export class AiSearch {
                     }
                     confirmed = true
                     this.event(mobile, 'initial-completed')
-                    await this.bot.browser.utils.cursor(page).scroll({ y: 400 }, { scrollSpeed: 65, scrollDelay: 150 })
+                    await this.readAndScroll(page, mobile)
                     if (choice.feedback === 'none') {
                         this.event(mobile, 'feedback-none')
                         return
@@ -245,11 +398,8 @@ export class AiSearch {
                             break
                         }
                         const input = page.locator('textarea[id^="b_copilot_composer_"]:visible').first()
-                        const submit = page
-                            .locator(':is(#b_copilot_search .b_copilot_send, #b_copilot_composer_form .b_csb_submit)')
-                            .first()
-                        const delay = this.bot.utils.randomDelay(35, 65)
-                        if (Date.now() + question.length * Number(delay) + 3000 >= this.deadline) break
+                        const submit = page.locator(SUBMIT).first()
+                        if (Date.now() + question.length * 65 + 9000 >= this.deadline) break
                         if (
                             !(await input.isVisible()) ||
                             !(await input.isEnabled()) ||
@@ -259,8 +409,11 @@ export class AiSearch {
                             this.event(mobile, 'skipped', 'composer-unavailable')
                             break
                         }
+                        await this.pause(1000, 2000)
                         if (!(await this.click(page, input))) break
-                        await page.keyboard.type(question, { delay: Number(delay) })
+                        await this.pause(250, 500)
+                        await this.type(page, question)
+                        await this.pause(400, 800)
                         await submit
                             .waitFor({
                                 state: 'visible',
@@ -283,9 +436,7 @@ export class AiSearch {
                         }
                         this.event(mobile, `followup-${n + 2}-completed`)
                         branch = `${query}; ${question}`.slice(0, 240)
-                        await this.bot.browser.utils
-                            .cursor(page)
-                            .scroll({ y: 300 }, { scrollSpeed: 65, scrollDelay: 150 })
+                        await this.readAndScroll(page, mobile)
                     }
                 } catch (error) {
                     this.active()

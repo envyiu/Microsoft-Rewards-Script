@@ -1,11 +1,14 @@
 import type { Request } from 'patchright'
 
-// Only AiConversation may grant a transport request after checking page, query, turn and conversation.
-// Weak references do not leave reusable permissions after a request/tab/process finishes.
-const permits = new WeakSet<Request>()
-export function grantAiTurn(request: Request): void {
-    permits.add(request)
+// Tab-local permissions from AiConversation. Empty landing loads are not searches;
+// initial answer transport must consume the ticket reserved before pressing Enter.
+export type AiPermit = 'landing' | 'setup' | 'initial' | 'continuation'
+const permits = new WeakMap<Request, AiPermit>()
+export function grantAiTurn(request: Request, kind: AiPermit = 'continuation'): void {
+    permits.set(request, kind)
 }
-export function consumeAiTurn(request: Request): boolean {
-    return permits.delete(request)
+export function consumeAiTurn(request: Request): AiPermit | undefined {
+    const kind = permits.get(request)
+    permits.delete(request)
+    return kind
 }

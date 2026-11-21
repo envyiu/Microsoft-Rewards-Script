@@ -85,7 +85,15 @@ export class NormalSession {
                 await route.fallback()
                 return
             }
-            if (consumeAiTurn(route.request()) && !this.blocked) {
+            const aiPermit = consumeAiTurn(route.request())
+            if (aiPermit && !this.blocked) {
+                if (aiPermit === 'setup' || aiPermit === 'initial') {
+                    if (this.browserTicket !== 'search' || this.searchBlocked) {
+                        await route.abort('blockedbyclient')
+                        return
+                    }
+                    if (aiPermit === 'initial') this.browserTicket = false
+                }
                 await route.fallback()
                 return
             }
