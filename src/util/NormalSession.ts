@@ -31,15 +31,16 @@ export class NormalSession {
     private logins = 0
     private stagnant = 0
     private reconciling = false
-    private browserTicket = false
+    private browserTicket: false | 'search' | 'visual' = false
+    private visualUsed = 0
     private failureScope: NormalizedScope = 'account'
 
     setFailureScope(scope: OutcomeScope): void {
         this.failureScope = normalizeScope(scope)
     }
 
-    beginSend(): void {
-        if (this.active) this.browserTicket = true
+    beginSend(kind = 'normal'): void {
+        if (this.active) this.browserTicket = kind === 'visual' ? 'visual' : 'search'
     }
 
     endSend(): void {
@@ -51,11 +52,15 @@ export class NormalSession {
         const url = new URL(rawUrl)
         if (
             !/(^|\.)bing\.com$/.test(url.hostname) ||
-            !/\/(?:search|searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname)
+            (!/\/(?:search|searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) &&
+                !(url.pathname === '/images/search' && url.searchParams.has('bcid')))
         )
             return
         this.assertActive()
-        if (!this.browserTicket || this.searchBlocked)
+        const visual =
+            /\/(?:searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) ||
+            (url.pathname === '/images/search' && url.searchParams.has('bcid'))
+        if (!this.browserTicket || (this.browserTicket === 'visual' ? !visual : this.searchBlocked))
             throw Object.assign(new Error('SESSION_UNRESERVED_QUERY'), { code: 'SESSION_UNRESERVED_QUERY' })
         this.browserTicket = false
     }
@@ -64,11 +69,21 @@ export class NormalSession {
         if (!this.active) return
         await context.route(/https?:\/\/(?:[^/]+\.)?bing\.com\//, async route => {
             const url = new URL(route.request().url())
-            if (!/\/(?:search|searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname)) {
+            if (
+                !/\/(?:search|searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) &&
+                !(url.pathname === '/images/search' && url.searchParams.has('bcid'))
+            ) {
                 await route.fallback()
                 return
             }
-            if (this.browserTicket && !this.blocked && !this.searchBlocked) {
+            const visual =
+                /\/(?:searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) ||
+                (url.pathname === '/images/search' && url.searchParams.has('bcid'))
+            if (
+                this.browserTicket &&
+                !this.blocked &&
+                (this.browserTicket === 'visual' ? visual : !this.searchBlocked)
+            ) {
                 this.browserTicket = false
                 await route.fallback()
             } else await route.abort('blockedbyclient')
@@ -80,7 +95,16 @@ export class NormalSession {
         this.journal = process.env.MRS_NORMAL_QUERY_JOURNAL
         if (!this.journal) throw new Error('Account session requires a durable query journal')
         const rows = fs.readFileSync(this.journal, 'utf8').split('\n').filter(Boolean)
-        this.used = rows.length
+        this.used = rows.map(row => JSON.parse(row) as { kind?: string }).filter(row => row.kind !== 'visual').length
+        this.visualUsed = rows
+            .map(row => JSON.parse(row) as { kind?: string })
+            .filter(row => row.kind === 'visual').length
+        if (fs.existsSync(this.journal + '.visual')) {
+            this.visualUsed += fs
+                .readFileSync(this.journal + '.visual', 'utf8')
+                .split('\n')
+                .filter(Boolean).length
+        }
         this.normalUsed = rows
             .map(row => JSON.parse(row) as { kind?: string })
             .filter(row => !row.kind || row.kind === 'normal').length
@@ -95,6 +119,7 @@ export class NormalSession {
 
     async afterQuery(mobile: boolean, previous: number | undefined, kind = 'normal'): Promise<void> {
         if (!this.active) return
+        if (kind === 'visual') return
         const platform = mobile ? 'mobile' : 'desktop'
         await this.pacing?.()
         await this.refresh?.()
@@ -384,6 +409,30 @@ export class NormalSession {
     reserve(platform: 'mobile' | 'desktop', kind = 'normal'): void {
         if (!this.active || this.plan?.type !== 'accountSession') return
         this.assertActive()
+        if (kind === 'visual') {
+            if (
+                platform !== 'desktop' ||
+                this.plan.platform !== 'desktop' ||
+                !this.plan.workers.includes('visualSearch')
+            ) {
+                throw Object.assign(new Error('SESSION_VISUAL_NOT_ALLOWED'), { code: 'SESSION_VISUAL_NOT_ALLOWED' })
+            }
+            if (this.visualUsed >= 4) {
+                throw Object.assign(new Error('SESSION_VISUAL_LIMIT'), { code: 'SESSION_VISUAL_LIMIT' })
+            }
+            const fd = fs.openSync(this.journal! + '.visual', 'a', 0o600)
+            try {
+                fs.writeSync(
+                    fd,
+                    JSON.stringify({ at: new Date().toISOString(), kind, attempt: this.visualUsed + 1 }) + '\n'
+                )
+                fs.fsyncSync(fd)
+            } finally {
+                fs.closeSync(fd)
+            }
+            this.visualUsed++
+            return
+        }
         const quota = this.quotas[platform]
         const reject = (code: string): never => {
             throw Object.assign(new Error(code), { code })
@@ -428,8 +477,8 @@ export async function afterNormalQuery(mobile: boolean, previous: number | undef
     await current?.afterQuery(mobile, previous, kind)
 }
 
-export function beginNormalQuery(): void {
-    current?.beginSend()
+export function beginNormalQuery(kind = 'normal'): void {
+    current?.beginSend(kind)
 }
 export function endNormalQuery(): void {
     current?.endSend()

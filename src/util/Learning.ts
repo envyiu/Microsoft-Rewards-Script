@@ -70,10 +70,10 @@ export async function learningQuery<T>(
     const common = { queryId, kind, platform: mobile ? 'mobile' : 'desktop' }
     const previous = normalQueryProgress(mobile)
     reserveNormalQuery(mobile, kind)
-    reserveQuery(queryId, mobile ? 'mobile' : 'desktop')
+    if (kind !== 'visual') reserveQuery(queryId, mobile ? 'mobile' : 'desktop')
     learningEvent('query', { ...common, phase: 'intent' })
     try {
-        beginNormalQuery()
+        beginNormalQuery(kind)
         let result: T
         try {
             result = await send()

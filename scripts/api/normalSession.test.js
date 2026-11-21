@@ -57,7 +57,7 @@ test('app OAuth errors and missing quota do not create an account-wide failure',
     assert.throws(() => guard.reserve('desktop'), { code: 'SESSION_QUOTA_UNAVAILABLE' })
 })
 
-test('all query kinds share five durable reservations, including an uncertain send and restart', async t => {
+test('normal and quest query kinds share five durable reservations, including restart', async t => {
     const { guard, quota, plan, file } = fixture(t)
     let progress = 0,
         sent = 0
@@ -66,7 +66,7 @@ test('all query kinds share five durable reservations, including an uncertain se
         async () => quota(++progress * 3),
         async () => {}
     )
-    for (const kind of ['normal', 'activity', 'visual', 'bonus', 'activity']) {
+    for (const kind of ['normal', 'activity', 'activity', 'bonus', 'activity']) {
         await learningQuery(kind, false, async () => {
             sent++
         })
@@ -87,6 +87,50 @@ test('all query kinds share five durable reservations, including an uncertain se
         'info'
     )
     assert.throws(() => reloaded.reserve('desktop'), { code: 'SESSION_QUERY_LIMIT' })
+})
+
+test('visual search has a separate durable four-attempt allowance when common search is full or unknown', async t => {
+    const { guard, quota, plan, file } = fixture(t)
+    plan.workers = ['visualSearch']
+    quota(90)
+    for (let n = 0; n < 2; n++) await learningQuery('visual', false, async () => {})
+    quota(0, null)
+    await learningQuery('visual', false, async () => {})
+    assert.equal(guard.queries, 0)
+    assert.equal(guard.normalSearchRemaining, 5)
+    assert.equal(fs.readFileSync(file, 'utf8'), '')
+    const reloaded = new NormalSession(plan)
+    reloaded.reserve('desktop', 'visual')
+    assert.throws(() => reloaded.reserve('desktop', 'visual'), { code: 'SESSION_VISUAL_LIMIT' })
+    assert.throws(() => reloaded.reserve('desktop', 'normal'), { code: 'SESSION_QUOTA_UNAVAILABLE' })
+    assert.equal(reloaded.queries, 0)
+})
+
+test('visual allowance cannot authorize ordinary search or bypass account protection', async t => {
+    const { guard, plan, quota } = fixture(t)
+    plan.workers = ['visualSearch']
+    quota(90)
+    guard.reserve('desktop', 'visual')
+    guard.beginSend('visual')
+    assert.throws(() => guard.authorizeHttpSearch('https://www.bing.com/search?q=ordinary'), {
+        code: 'SESSION_UNRESERVED_QUERY'
+    })
+    guard.endSend()
+    guard.beginSend('visual')
+    assert.doesNotThrow(() => guard.authorizeHttpSearch('https://www.bing.com/images/search?bcid=fixture'))
+    guard.observe('LOGIN', 'verification required', 'error')
+    assert.throws(() => guard.reserve('desktop', 'visual'), { code: 'ACCOUNT_SESSION_STOPPED' })
+})
+
+test('visual search remains eligible after all five common query reservations are consumed', async t => {
+    const { guard, plan, quota } = fixture(t)
+    plan.workers = ['visualSearch']
+    quota()
+    for (let n = 0; n < 5; n++) guard.reserve('desktop', 'activity')
+    assert.throws(() => guard.reserve('desktop', 'normal'), { code: 'SESSION_QUERY_LIMIT' })
+    await learningQuery('visual', false, async () => {})
+    assert.equal(guard.queries, 5)
+    assert.equal(guard.activityQueries, 5)
 })
 
 test('uncertain send still consumes a query and cannot be refunded by telemetry failure', async t => {
@@ -338,7 +382,7 @@ test('exhausted daily normal search allowance leaves quest query allowance uncha
     assert.equal(guard.normalSearchRemaining, 0)
     assert.throws(() => guard.reserve('desktop', 'normal'), { code: 'SESSION_QUERY_LIMIT' })
     guard.reserve('desktop', 'activity')
-    guard.reserve('desktop', 'visual')
+    guard.reserve('desktop', 'bonus')
     const reloaded = new NormalSession(plan)
     quota()
     assert.equal(reloaded.normalSearchRemaining, 0)
