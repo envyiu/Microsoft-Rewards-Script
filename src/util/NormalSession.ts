@@ -7,6 +7,16 @@ export type OutcomeScope = 'account' | 'browser-session' | 'app' | 'app-oauth' |
 type NormalizedScope = 'account' | 'browser-session' | 'app-oauth' | 'quota-endpoint' | 'task'
 type Quota = { max: number; progress: number }
 
+function isVisualNavigation(url: URL): boolean {
+    return (
+        /\/(?:searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) ||
+        (url.pathname === '/images/search' && Boolean(url.searchParams.get('bcid'))) ||
+        (url.pathname === '/search' &&
+            Boolean(url.searchParams.get('bcid')) &&
+            url.searchParams.get('FORM')?.toUpperCase() === 'SBIVSP')
+    )
+}
+
 function normalizeScope(scope: OutcomeScope): NormalizedScope {
     return scope === 'app' ? 'app-oauth' : scope
 }
@@ -57,9 +67,7 @@ export class NormalSession {
         )
             return
         this.assertActive()
-        const visual =
-            /\/(?:searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) ||
-            (url.pathname === '/images/search' && url.searchParams.has('bcid'))
+        const visual = isVisualNavigation(url)
         if (!this.browserTicket || (this.browserTicket === 'visual' ? !visual : this.searchBlocked))
             throw Object.assign(new Error('SESSION_UNRESERVED_QUERY'), { code: 'SESSION_UNRESERVED_QUERY' })
         this.browserTicket = false
@@ -76,9 +84,7 @@ export class NormalSession {
                 await route.fallback()
                 return
             }
-            const visual =
-                /\/(?:searchbyimage|visualsearch)(?:\/|$)/i.test(url.pathname) ||
-                (url.pathname === '/images/search' && url.searchParams.has('bcid'))
+            const visual = isVisualNavigation(url)
             if (
                 this.browserTicket &&
                 !this.blocked &&

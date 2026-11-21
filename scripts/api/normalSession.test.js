@@ -133,6 +133,41 @@ test('visual search remains eligible after all five common query reservations ar
     assert.equal(guard.activityQueries, 5)
 })
 
+test('real browser accepts Bing SBIVSP visual-result navigation with full common quota but blocks ordinary search', async t => {
+    const { guard, plan, quota } = fixture(t)
+    plan.workers = ['visualSearch']
+    quota(90)
+    const { chromium } = require('patchright')
+    const browser = await chromium.launch({ headless: true })
+    t.after(() => browser.close())
+    const context = await browser.newContext({ serviceWorkers: 'block' })
+    let allowed = 0
+    await context.route('**/*', async route => {
+        allowed++
+        await route.fulfill({ status: 200, contentType: 'text/html', body: '<html>synthetic visual result</html>' })
+    })
+    await guard.protectBrowser(context)
+    const visual = 'https://www.bing.com/search?q=fixture&bcid=fixture-image&FORM=SBIVSP&fq=fixture&hq=fixture'
+    let page = await context.newPage()
+    await learningQuery('visual', false, () => page.goto(visual))
+    assert.equal(allowed, 1)
+    assert.equal(guard.queries, 0)
+    await page.close()
+    page = await context.newPage()
+    await assert.rejects(() =>
+        learningQuery('visual', false, () => page.goto('https://www.bing.com/search?q=ordinary'))
+    )
+    assert.equal(allowed, 1)
+    await page.close()
+    guard.beginSend('visual')
+    assert.doesNotThrow(() => guard.authorizeHttpSearch(visual))
+    guard.beginSend('visual')
+    assert.throws(() => guard.authorizeHttpSearch('https://www.bing.com/search?q=ordinary&FORM=SBIVSP'), {
+        code: 'SESSION_UNRESERVED_QUERY'
+    })
+    guard.endSend()
+})
+
 test('uncertain send still consumes a query and cannot be refunded by telemetry failure', async t => {
     const { guard, quota, file } = fixture(t)
     quota()
