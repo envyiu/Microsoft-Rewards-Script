@@ -254,3 +254,5 @@ Log `AI-SEARCH stage=...` và telemetry activity `task=aiSearch` theo dõi riên
 Mỗi lượt mở `/copilotsearch?q=` trống, nghỉ 0,5–1 giây, dùng Ghost Cursor chọn composer, nghỉ 0,25–0,5 giây rồi gõ từng ký tự (35–65 ms/ký tự). Nghỉ 0,4–0,8 giây trước Enter. Mở trang trống không phải search; reservation và vé gửi query chỉ được cấp ngay trước Enter. Cả hai dạng phản hồi của Bing (điều hướng tới URL đã có query hoặc AJAX/iframe trong trang trống) dùng đúng một reservation.
 
 Chỉ sau khi đã xác nhận AI trả lời hoàn chỉnh mới dừng đọc thêm 5–8 giây, cuộn bằng Ghost Cursor tới cuối trang, dừng 1–1,5 giây rồi nhấn phản hồi đã lấy mẫu. Câu tiếp cũng có nhịp nghỉ trước click, gõ từng ký tự, nghỉ trước gửi và đọc/cuộn sau câu trả lời. Tổng thời hạn tab AI vẫn là 120 giây; nếu không còn đủ thời gian cho thao tác thì bỏ phần tùy chọn, không chạy dồn. Thời gian nghỉ search 20–40 giây vẫn giữ riêng theo cấu hình hiện có.
+
+Xem [thử nghiệm Gradient Boosting và CP-SAT](SMART_CP_SAT_VI.md) để chạy lại benchmark thời lượng và lịch Smart trên dữ liệu lịch sử.
